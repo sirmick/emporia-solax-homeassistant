@@ -1,0 +1,4 @@
+pyemvue>=1.0.0
+ha-mqtt-discoverable>=0.12.0
+paho-mqtt>=1.6.1
+requests>=2.25.0

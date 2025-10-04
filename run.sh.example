@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Example run script for Emporia Solax Home Assistant Integration
+# Copy this file to run.sh and customize the values below
+
+# Solax inverter settings
+INVERTER_IP="192.168.1.100"
+SERIAL_NUMBER="SSAXHKSYAE"
+
+# MQTT broker settings
+MQTT_BROKER="192.168.1.10"
+MQTT_USERNAME="homeassistant"
+MQTT_PASSWORD="your_mqtt_password"
+
+# Primary charger name (as shown in Emporia app)
+PRIMARY_CHARGER="Tesla Model 3"
+
+# Optional settings
+BATTERY_CAPACITY=20.0
+MIN_SOC=30
+POLL_INTERVAL=10
+VERBOSE=true
+
+# Run the script
+if [ "$VERBOSE" = true ]; then
+    python poll.py "$INVERTER_IP" "$SERIAL_NUMBER" "$MQTT_BROKER" "$PRIMARY_CHARGER" \
+        --username "$MQTT_USERNAME" --password "$MQTT_PASSWORD" \
+        --battery-capacity "$BATTERY_CAPACITY" --min-soc "$MIN_SOC" \
+        --sleep "$POLL_INTERVAL" --verbose
+else
+    python poll.py "$INVERTER_IP" "$SERIAL_NUMBER" "$MQTT_BROKER" "$PRIMARY_CHARGER" \
+        --username "$MQTT_USERNAME" --password "$MQTT_PASSWORD" \
+        --battery-capacity "$BATTERY_CAPACITY" --min-soc "$MIN_SOC" \
+        --sleep "$POLL_INTERVAL"
+fi

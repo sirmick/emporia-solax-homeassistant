@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emporia-solax-homeassistant"
+version = "1.0.0"
+description = "Solar-powered EV charger controller with Home Assistant integration"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "pyemvue>=1.0.0",
+    "ha-mqtt-discoverable>=0.12.0",
+    "paho-mqtt>=1.6.1",
+    "requests>=2.25.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sirmick/emporia-solax-homeassistant"
+Repository = "https://github.com/sirmick/emporia-solax-homeassistant"
+Issues = "https://github.com/sirmick/emporia-solax-homeassistant/issues"
+
+[project.scripts]
+emporia-solax-poll = "poll:main"
+
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.package-dir]
+"" = "."
+
+[tool.black]
+line-length = 120
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 120
