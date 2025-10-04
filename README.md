@@ -87,7 +87,7 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 ### Example
 
 ```bash
-python poll.py 192.168.1.100 SSAXHKSYAE 192.168.1.10 "Tesla Model 3" \
+python poll.py inverter.home.arpa INVERTER_SERIAL mqtt.home.arpa "Tesla Model 3" \
   --username homeassistant --password mypassword \
   --battery-capacity 25.0 --min-soc 20 --verbose
 ```
