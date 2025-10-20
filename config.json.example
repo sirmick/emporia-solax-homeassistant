@@ -1,0 +1,42 @@
+{
+  "solax": {
+    "ip_address": "192.168.88.123",
+    "serial_number": "XTR789BZY42"
+  },
+  "mqtt": {
+    "broker": "mqtt.example.home",
+    "username": "mqttuser",
+    "password": "secretpass"
+  },
+  "chargers": {
+    "primary_charger": "Garage Charger"
+  },
+  "time_based_behavior": {
+    "switch_on_time": "11:00",
+    "switch_off_time": "18:00",
+    "fixed_charge_start": "00:10",
+    "fixed_charge_end": "06:00",
+    "fixed_charge_current": 40,
+    "min_excess_threshold": 1440,
+    "battery_soc_threshold": 85,
+    "timezone": "Europe/London"
+  },
+  "charger_limits": {
+    "max_current": 30,
+    "min_current": 6,
+    "on_to_off_lockout": 60,
+    "off_to_on_lockout": 240
+  },
+  "system": {
+    "battery_capacity": 20.0,
+    "min_soc": 20,
+    "power_avg_window": 5,
+    "max_power_threshold": 50000,
+    "sleep_interval": 10,
+    "creds_file": "keys.json",
+    "timezone": "Europe/London",
+    "bus_maximum": 7000,
+    "buffer": 100,
+    "detailed_log": false
+  }
+}
