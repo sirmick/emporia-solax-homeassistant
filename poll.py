@@ -931,18 +931,16 @@ class ChargerController:
 
     def __init__(self, vue: pyemvue.PyEmVue, charger_name: str,
                  mqtt_settings: Settings.MQTT, upper_limit=30, lower_limit=6,
-                 voltage=240, on_to_off_lockout=60, off_to_on_lockout=240,
-                 bus_maximum=7000, buffer=100, is_primary=False,
+                 voltage=240, bus_maximum=7000, buffer=100, is_primary=False,
+                 state_change_min_interval=10,
                  time_controller: TimeBasedController = None):
         self.upper_limit = upper_limit
         self.bus_maximum = bus_maximum
         self.lower_limit = lower_limit
         self.voltage = voltage
-        self.on_to_off_lockout = on_to_off_lockout
-        self.off_to_on_lockout = off_to_on_lockout
         self.buffer = buffer
-        self.on_to_off_time = datetime.datetime.now()
-        self.off_to_on_time = datetime.datetime.now()
+        self.state_change_min_interval = state_change_min_interval  # Minutes between state changes
+        self.last_state_change_time = datetime.datetime.now() - datetime.timedelta(minutes=state_change_min_interval)  # Initialize as if it's been long enough
         self.vue = vue
         self.charger_name = charger_name
         self.is_primary = is_primary
@@ -1392,6 +1390,7 @@ class ChargerController:
         the_charger = charger_data[self.charger_name]
         current_charger_on = the_charger.get('on', False)
 
+        # Check if we actually need to make a change
         needs_update = (self.charger_current != proposed_current) or (current_charger_on != charger_on)
 
         if not needs_update:
@@ -1399,6 +1398,27 @@ class ChargerController:
                 print(f"DEBUG CHARGER: No change needed - current={self.charger_current}A (on={current_charger_on}), proposed={proposed_current}A (on={charger_on})")
             return None
 
+        # Check if this is a state change (on/off) rather than just a current adjustment
+        is_state_change = (current_charger_on != charger_on)
+        
+        # If this is a state change, check if we've exceeded the minimum interval between state changes
+        if is_state_change:
+            now = datetime.datetime.now()
+            time_since_last_change = (now - self.last_state_change_time).total_seconds() / 60.0  # Minutes
+            
+            # If not enough time has passed, skip this state change
+            if time_since_last_change < self.state_change_min_interval:
+                minutes_to_wait = self.state_change_min_interval - time_since_last_change
+                print(f"⏳ {self.charger_name}: State change rate limited - last change was {time_since_last_change:.1f} minutes ago")
+                print(f"   Need to wait {minutes_to_wait:.1f} more minutes before changing state again")
+                
+                # Still allow current changes within the same state
+                if self.charger_current != proposed_current and current_charger_on == charger_on:
+                    if hasattr(self, 'verbose') and self.verbose:
+                        print(f"DEBUG CHARGER: Still applying current change within same state: {self.charger_current}A -> {proposed_current}A")
+                else:
+                    return None
+                    
         if hasattr(self, 'verbose') and self.verbose:
             print(f"DEBUG CHARGER: State change detected - current={self.charger_current}A (on={current_charger_on}) -> proposed={proposed_current}A (on={charger_on})")
 
@@ -1470,6 +1490,12 @@ class ChargerController:
                     reason=reason,
                     values=values
                 )
+                
+                # Update last state change time if this was a state change (on/off)
+                if old_state != new_state:
+                    self.last_state_change_time = datetime.datetime.now()
+                    if hasattr(self, 'verbose') and self.verbose:
+                        print(f"DEBUG CHARGER: Updated last state change time for {self.charger_name}")
 
                 # Update local state (already done in _verify_charger_state)
                 return action
@@ -1636,13 +1662,8 @@ def main() -> None:
         type=int
     )
     parser.add_argument(
-        "--on-to-off-lockout",
-        help="Lockout time in seconds when changing from on to off",
-        type=int
-    )
-    parser.add_argument(
-        "--off-to-on-lockout",
-        help="Lockout time in seconds when changing from off to on",
+        "--state-change-min-interval",
+        help="Minimum interval in minutes between charger state changes (default: 10)",
         type=int
     )
     parser.add_argument(
@@ -1713,8 +1734,7 @@ def main() -> None:
     min_current = get_config_value('charger_limits', 'min_current', 6, getattr(args, 'min_current', None))
     bus_maximum = get_config_value('system', 'bus_maximum', 7000, getattr(args, 'bus_maximum', None))
     buffer = get_config_value('system', 'buffer', 100, getattr(args, 'buffer', None))
-    on_to_off_lockout = get_config_value('charger_limits', 'on_to_off_lockout', 60, getattr(args, 'on_to_off_lockout', None))
-    off_to_on_lockout = get_config_value('charger_limits', 'off_to_on_lockout', 240, getattr(args, 'off_to_on_lockout', None))
+    state_change_min_interval = get_config_value('charger_limits', 'state_change_min_interval', 10, getattr(args, 'state_change_min_interval', None))
 
     # Validate required parameters
     if not solax_ip:
@@ -1794,11 +1814,10 @@ def main() -> None:
             upper_limit=max_current,
             lower_limit=min_current,
             voltage=240,  # This is still hardcoded, could be a future enhancement
-            on_to_off_lockout=on_to_off_lockout,
-            off_to_on_lockout=off_to_on_lockout,
             bus_maximum=bus_maximum,
             buffer=buffer,
             is_primary=is_primary,
+            state_change_min_interval=state_change_min_interval,
             time_controller=time_controller
         )
         controller.verbose = verbose  # Set verbose flag on controller

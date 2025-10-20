@@ -143,8 +143,7 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 - `--min-current`: Minimum charging current in amps (default: 6)
 - `--bus-maximum`: Maximum power the AC bus can handle in watts (default: 7000)
 - `--buffer`: Power buffer in watts to maintain as safety margin (default: 100)
-- `--on-to-off-lockout`: Lockout time in seconds when changing from on to off (default: 60)
-- `--off-to-on-lockout`: Lockout time in seconds when changing from off to on (default: 240)
+- `--state-change-min-interval`: Minimum time in minutes between charger on/off state changes (default: 10)
 
 #### Time-Based Behavior Options
 - `--switch-on-time`: Time to enable daytime automated charging (e.g., '11:00')
@@ -210,7 +209,13 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 5. **Battery Protection**: Reserves power for battery charging when SOC is below thresholds
 6. **Time-based Rules**: Two distinct charging modes based on time of day:
    - **Unrestricted Charging Period**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
-   - **Daytime Automated Charging**: During daylight hours (default 11am-6pm), intelligently controls charging based on available solar excess and battery SOC. Only enables charging when excess solar power exceeds threshold AND battery is above minimum SOC.
+   - **Daytime Automated Charging**: During daylight hours (default 11am-6pm), operates with these rules:
+     * Only enables charging when BOTH conditions are true:
+       1. Excess solar power exceeds minimum threshold (default 1440W)
+       2. Battery SOC is above minimum threshold (default 85%)
+     * Current is calculated dynamically based on available excess power
+     * If available power drops below minimum current threshold, charging is paused
+     * After switch-off time (default 6pm), charging is disabled if battery begins discharging
    - **Outside Hours**: Charging is disabled by default outside of these specific time windows unless manually controlled.
 
 ## Logging Output

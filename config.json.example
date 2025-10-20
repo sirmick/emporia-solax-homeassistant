@@ -24,8 +24,7 @@
   "charger_limits": {
     "max_current": 30,
     "min_current": 6,
-    "on_to_off_lockout": 60,
-    "off_to_on_lockout": 240
+    "state_change_min_interval": 10
   },
   "system": {
     "battery_capacity": 20.0,
