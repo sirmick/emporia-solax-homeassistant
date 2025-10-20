@@ -40,14 +40,64 @@ A Python script that polls data from a Solax solar inverter and Emporia Vue ener
 
 ## Configuration
 
+### Configuration File
+
+You can configure the script using a JSON configuration file (`config.json`):
+
+```json
+{
+  "solax": {
+    "ip_address": "192.168.88.123",
+    "serial_number": "XTR789BZY42"
+  },
+  "mqtt": {
+    "broker": "mqtt.example.home",
+    "username": "mqttuser",
+    "password": "secretpass"
+  },
+  "chargers": {
+    "primary_charger": "Garage Charger"
+  },
+  "time_based_behavior": {
+    "switch_on_time": "11:00",
+    "switch_off_time": "18:00",
+    "fixed_charge_start": "00:10",
+    "fixed_charge_end": "06:00",
+    "fixed_charge_current": 40,
+    "min_excess_threshold": 1440,
+    "battery_soc_threshold": 85,
+    "timezone": "Europe/London"
+  },
+  "charger_limits": {
+    "max_current": 30,
+    "min_current": 6,
+    "on_to_off_lockout": 60,
+    "off_to_on_lockout": 240
+  },
+  "system": {
+    "battery_capacity": 20.0,
+    "min_soc": 20,
+    "power_avg_window": 5,
+    "max_power_threshold": 50000,
+    "sleep_interval": 10,
+    "creds_file": "keys.json",
+    "timezone": "Europe/London",
+    "bus_maximum": 7000,
+    "buffer": 100
+  }
+}
+```
+
+All options in the configuration file have corresponding command-line arguments. Command-line arguments take precedence over configuration file settings.
+
 ### Emporia Vue Setup
 
 Create a `keys.json` file with your Emporia Vue login credentials:
 
 ```json
 {
-  "username": "your_emporia_email@example.com",
-  "password": "your_emporia_password"
+  "username": "my.email@example.org",
+  "password": "my-secure-emporia-password"
 }
 ```
 
@@ -55,7 +105,7 @@ The script will automatically handle token storage and refresh.
 
 ### MQTT Configuration
 
-The script connects to an MQTT broker for Home Assistant integration. Configure the broker details via command-line arguments.
+The script connects to an MQTT broker for Home Assistant integration. Configure the broker details via command-line arguments or the configuration file.
 
 ## Usage
 
@@ -74,22 +124,60 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 
 ### Options
 
+#### Basic Options
 - `-u, --username`: MQTT username (default: 'a')
 - `-p, --password`: MQTT password (default: 'a')
 - `-s, --sleep`: Poll interval in seconds (default: 10)
 - `-c, --creds-file`: Emporia credentials file (default: 'keys.json')
 - `-v, --verbose`: Enable verbose logging
+- `--detailed-log`: Enable detailed JSON logging to poll_log.json (off by default)
 - `--battery-capacity`: Battery capacity in kWh (default: 20.0)
 - `--min-soc`: Minimum battery SOC threshold (default: 30)
 - `--power-avg-window`: Battery power averaging window in minutes (default: 5)
 - `--max-power-threshold`: Maximum valid power reading in watts (default: 50000)
+- `--timezone`: Timezone for timestamps (e.g., 'America/New_York', 'Europe/London')
+- `--config`: Path to configuration JSON file (default: 'config.json')
 
-### Example
+#### Charger Limits Options
+- `--max-current`: Maximum charging current in amps (default: 30)
+- `--min-current`: Minimum charging current in amps (default: 6)
+- `--bus-maximum`: Maximum power the AC bus can handle in watts (default: 7000)
+- `--buffer`: Power buffer in watts to maintain as safety margin (default: 100)
+- `--on-to-off-lockout`: Lockout time in seconds when changing from on to off (default: 60)
+- `--off-to-on-lockout`: Lockout time in seconds when changing from off to on (default: 240)
+
+#### Time-Based Behavior Options
+- `--switch-on-time`: Time to enable daytime automated charging (e.g., '11:00')
+- `--switch-off-time`: Time to disable daytime automated charging (e.g., '18:00')
+- `--fixed-charge-start`: Start time for unrestricted charging period (e.g., '00:10')
+- `--fixed-charge-end`: End time for unrestricted charging period (e.g., '06:00')
+- `--fixed-charge-current`: Current for unrestricted charging period in amps (default: 40)
+- `--min-excess-threshold`: Minimum excess power threshold in watts for daytime automated charging (default: 1440)
+- `--battery-soc-threshold`: Battery SOC threshold in percent for enabling daytime automated charging (default: 85)
+
+### Examples
+
+#### Using Command-line Arguments
 
 ```bash
-python poll.py inverter.home.arpa INVERTER_SERIAL mqtt.home.arpa "Tesla Model 3" \
-  --username homeassistant --password mypassword \
+python poll.py inverter.local XTR789BZY42 mqtt.local "BMW i4" \
+  --username homeassistant --password securepass \
   --battery-capacity 25.0 --min-soc 20 --verbose
+```
+
+#### Using Configuration File
+
+```bash
+# Create config.json with your settings first
+python poll.py --config my-solar-setup.json --verbose
+```
+
+#### Mixed Mode
+
+```bash
+# Use config file but override specific options
+python poll.py --config config.json \
+  --timezone "America/Chicago" --max-current 32 --verbose
 ```
 
 ## MQTT Topics
@@ -120,14 +208,17 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 3. **Charger Control**: Adjusts EV charger current based on excess power availability
 4. **Priority Logic**: Primary chargers get priority, secondary chargers share remaining power
 5. **Battery Protection**: Reserves power for battery charging when SOC is below thresholds
-6. **Time-based Rules**: Enables charging only between 10am-4pm, disables after 4pm if battery draining
+6. **Time-based Rules**: Two distinct charging modes based on time of day:
+   - **Unrestricted Charging Period**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
+   - **Daytime Automated Charging**: During daylight hours (default 11am-6pm), intelligently controls charging based on available solar excess and battery SOC. Only enables charging when excess solar power exceeds threshold AND battery is above minimum SOC.
+   - **Outside Hours**: Charging is disabled by default outside of these specific time windows unless manually controlled.
 
 ## Logging Output
 
 The script provides comprehensive status logging:
 
 ```
-[19:37:42] 🔋 85% (0.5kW, 25°C) ⏱️ Full: 02:15 (min 30%) 🔄 0.0kW ☀️ 5.2kW 🏠 2.1kW 🏠➡️ 1.8kW ⚡ 1.3kW 🚗 Tesla Model 3: 🟢⚡✅ 16A/3.7kW
+[14:22:35] 🔋 82% (0.7kW, 24°C) ⏱️ Full: 01:45 (min 30%) 🔄 0.0kW ☀️ 4.8kW 🏠 1.9kW 🏠➡️ 2.2kW ⚡ 1.4kW 🚗 BMW i4: 🟢⚡✅ 18A/4.1kW
 ```
 
 This shows battery status, time estimates, power flows, and charger states.
