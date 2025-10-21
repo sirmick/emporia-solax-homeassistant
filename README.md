@@ -58,12 +58,12 @@ You can configure the script using a JSON configuration file (`config.json`):
   "chargers": {
     "primary_charger": "Garage Charger"
   },
-  "time_based_behavior": {
-    "switch_on_time": "11:00",
-    "switch_off_time": "18:00",
-    "fixed_charge_start": "00:10",
-    "fixed_charge_end": "06:00",
-    "fixed_charge_current": 40,
+  "time_period_policies": {
+    "solar_excess_start_time": "11:00",
+    "solar_excess_end_time": "18:00",
+    "unrestricted_start_time": "00:10",
+    "unrestricted_end_time": "06:00",
+    "unrestricted_current": 40,
     "min_excess_threshold": 1440,
     "battery_soc_threshold": 85,
     "timezone": "Europe/London"
@@ -145,14 +145,14 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 - `--buffer`: Power buffer in watts to maintain as safety margin (default: 100)
 - `--state-change-min-interval`: Minimum time in minutes between charger on/off state changes (default: 10)
 
-#### Time-Based Behavior Options
-- `--switch-on-time`: Time to enable daytime automated charging (e.g., '11:00')
-- `--switch-off-time`: Time to disable daytime automated charging (e.g., '18:00')
-- `--fixed-charge-start`: Start time for unrestricted charging period (e.g., '00:10')
-- `--fixed-charge-end`: End time for unrestricted charging period (e.g., '06:00')
-- `--fixed-charge-current`: Current for unrestricted charging period in amps (default: 40)
-- `--min-excess-threshold`: Minimum excess power threshold in watts for daytime automated charging (default: 1440)
-- `--battery-soc-threshold`: Battery SOC threshold in percent for enabling daytime automated charging (default: 85)
+#### Time Period Policy Options
+- `--solar-excess-start-time`: Start time for solar excess charging period (e.g., '11:00')
+- `--solar-excess-end-time`: End time for solar excess charging period (e.g., '18:00')
+- `--unrestricted-start-time`: Start time for unrestricted charging period (e.g., '00:10')
+- `--unrestricted-end-time`: End time for unrestricted charging period (e.g., '06:00')
+- `--unrestricted-current`: Current for unrestricted charging period in amps (default: 40)
+- `--min-excess-threshold`: Minimum excess power threshold in watts for solar excess charging (default: 1440)
+- `--battery-soc-threshold`: Battery SOC threshold in percent for enabling solar excess charging (default: 85)
 
 ### Examples
 
@@ -207,15 +207,15 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 3. **Charger Control**: Adjusts EV charger current based on excess power availability
 4. **Priority Logic**: Primary chargers get priority, secondary chargers share remaining power
 5. **Battery Protection**: Reserves power for battery charging when SOC is below thresholds
-6. **Time-based Rules**: Two distinct charging modes based on time of day:
-   - **Unrestricted Charging Period**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
-   - **Daytime Automated Charging**: During daylight hours (default 11am-6pm), operates with these rules:
+6. **Time Period Policies**: Two distinct charging policies based on time of day:
+   - **Unrestricted Charging**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
+   - **Solar Excess Charging**: During daylight hours (default 11am-6pm), operates with these rules:
      * Only enables charging when BOTH conditions are true:
        1. Excess solar power exceeds minimum threshold (default 1440W)
        2. Battery SOC is above minimum threshold (default 85%)
      * Current is calculated dynamically based on available excess power
      * If available power drops below minimum current threshold, charging is paused
-     * After switch-off time (default 6pm), charging is disabled if battery begins discharging
+     * After solar excess end time (default 6pm), charging is disabled if battery begins discharging
    - **Outside Hours**: Charging is disabled by default outside of these specific time windows unless manually controlled.
 
 ## Logging Output

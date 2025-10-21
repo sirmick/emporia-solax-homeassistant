@@ -10,6 +10,7 @@ This script connects to a Solax solar inverter and Emporia Vue energy monitor to
 import argparse
 import datetime
 import json
+import logging
 import os
 import sys
 import time
@@ -23,6 +24,9 @@ from ha_mqtt_discoverable import Settings, DeviceInfo
 from ha_mqtt_discoverable.sensors import Sensor, SensorInfo, Switch, SwitchInfo
 from paho.mqtt.client import Client, MQTTMessage
 from pyemvue.enums import Scale, Unit
+
+# Set up logger
+logger = logging.getLogger("solax_emporia")
 
 # Log file for JSON logging
 LOG_FILE = 'poll_log.json'
@@ -105,10 +109,9 @@ def get_inverter_data(ip_address: str, serial_number: str) -> dict:
         response = requests.post(url, data=payload, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
-        if hasattr(get_inverter_data, 'verbose') and get_inverter_data.verbose:
-            print(f"[debug] Inverter API call successful to {ip_address}")
-            print(f"[debug] Response status: {response.status_code}")
-            print(f"[debug] Data array length: {len(data.get('Data', []))}")
+        logger.debug(f"Inverter API call successful to {ip_address}")
+        logger.debug(f"Response status: {response.status_code}")
+        logger.debug(f"Data array length: {len(data.get('Data', []))}")
         return data
     except requests.exceptions.Timeout:
         print(f"Error: Connection to {ip_address} timed out.", file=sys.stderr)
@@ -440,10 +443,9 @@ def get_emporia_chargers(vue: pyemvue.PyEmVue) -> dict:
             scale=Scale.SECOND.value,
             unit=Unit.KWH.value
         )
-        if hasattr(get_emporia_chargers, 'verbose') and get_emporia_chargers.verbose:
-            print(f"[debug] Emporia API call successful")
-            print(f"[debug] Found {len(charger_by_id)} chargers: {list(charger_by_name.keys())}")
-            print(f"[debug] Retrieved power data for {len(vue_power)} devices")
+        logger.debug(f"Emporia API call successful")
+        logger.debug(f"Found {len(charger_by_id)} chargers: {list(charger_by_name.keys())}")
+        logger.debug(f"Retrieved power data for {len(vue_power)} devices")
     except Exception as e:
         print(f"Error reading Emporia API: {e}")
         return None
@@ -474,10 +476,9 @@ def get_emporia_chargers(vue: pyemvue.PyEmVue) -> dict:
             'breaker_pin': device.ev_charger.breaker_pin,
         }
 
-        # Log charger status if verbose
-        if hasattr(get_emporia_chargers, 'verbose') and get_emporia_chargers.verbose:
-            power_kw = power_watts / 1000
-            print(f"[debug] {name}: {power_kw:.1f}kW | {current_amps}A | Status: {status} | Message: {message}")
+        # Log charger status
+        power_kw = power_watts / 1000
+        logger.debug(f"{name}: {power_kw:.1f}kW | {current_amps}A | Status: {status} | Message: {message}")
 
     return charger_data
 
@@ -677,7 +678,7 @@ class InverterSensorManager:
     def _create_sensor(self, name: str, device_class: str, unit: str, device_info: DeviceInfo):
         """Create a single MQTT sensor."""
         sensor_id = name.lower().replace('/', '_')
-        print(f'Registering MQTT sensor: {sensor_id}')
+        logger.debug(f'Registering MQTT sensor: {sensor_id}')
         self.sensors[name] = Sensor(Settings(mqtt=self.mqtt_settings, entity=SensorInfo(
             name=name.replace('/', ' '),
             device_class=device_class,
@@ -716,9 +717,8 @@ class PowerCalculator:
         }
 
         # Debug logging
-        if hasattr(PowerCalculator, 'verbose') and PowerCalculator.verbose:
-            print(f"[debug] Power Metrics: Solar {solar_power}W | House {house_load}W | Excess {excess}W | Buffer {buffer}W")
-            print(f"[debug] Battery: To {metrics['to_battery']}W | From {metrics['from_battery']}W | SOC {metrics['soc_battery']}%")
+        logger.debug(f"Power Metrics: Solar {solar_power}W | House {house_load}W | Excess {excess}W | Buffer {buffer}W")
+        logger.debug(f"Battery: To {metrics['to_battery']}W | From {metrics['from_battery']}W | SOC {metrics['soc_battery']}%")
 
         return metrics
     
@@ -744,9 +744,8 @@ class PowerCalculator:
         available_for_charge = min(available_excess, available_via_bus)
 
         # Debug logging
-        if hasattr(PowerCalculator, 'verbose') and PowerCalculator.verbose:
-            print(f"[debug] Power Budget: Excess {available_excess}W | Bus {available_via_bus}W | Available {available_for_charge}W")
-            print(f"[debug] Constraints: Total charger load {total_charger_load}W | Reserve {reserve_for_battery}W | Bus max {bus_maximum}W")
+        logger.debug(f"Power Budget: Excess {available_excess}W | Bus {available_via_bus}W | Available {available_for_charge}W")
+        logger.debug(f"Constraints: Total charger load {total_charger_load}W | Reserve {reserve_for_battery}W | Bus max {bus_maximum}W")
 
         return {
             'available_excess': available_excess,
@@ -834,25 +833,30 @@ class PowerCalculator:
         return 0.0
 
 
-class TimeBasedController:
-    """Manages time-based charging rules independent of power calculations."""
+class TimePeriodPolicyController:
+    """Manages charging policies based on time periods.
+    
+    Implements two distinct charging policies:
+    1. Unrestricted Charging: Fixed current charging regardless of solar production
+    2. Solar Excess Charging: Dynamic charging based on available solar excess power
+    """
 
-    def __init__(self, switch_on_time="11:00", switch_off_time="18:00",
-                 fixed_charge_start="00:10", fixed_charge_end="06:00",
-                 fixed_charge_current=40, min_excess_threshold=1440,
+    def __init__(self, solar_excess_start_time="11:00", solar_excess_end_time="18:00",
+                 unrestricted_start_time="00:10", unrestricted_end_time="06:00",
+                 unrestricted_current=40, min_excess_threshold=1440,
                  battery_soc_threshold=85, timezone=None, min_current=6, max_current=30):
         self.timezone = timezone or pytz.UTC
-        self.switch_on_time = datetime.datetime.strptime(switch_on_time, "%H:%M").time()
-        self.switch_off_time = datetime.datetime.strptime(switch_off_time, "%H:%M").time()
-        self.fixed_charge_start = datetime.datetime.strptime(fixed_charge_start, "%H:%M").time()
-        self.fixed_charge_end = datetime.datetime.strptime(fixed_charge_end, "%H:%M").time()
-        self.fixed_charge_current = fixed_charge_current
+        self.solar_excess_start_time = datetime.datetime.strptime(solar_excess_start_time, "%H:%M").time()
+        self.solar_excess_end_time = datetime.datetime.strptime(solar_excess_end_time, "%H:%M").time()
+        self.unrestricted_start_time = datetime.datetime.strptime(unrestricted_start_time, "%H:%M").time()
+        self.unrestricted_end_time = datetime.datetime.strptime(unrestricted_end_time, "%H:%M").time()
+        self.unrestricted_current = unrestricted_current
         self.min_excess_threshold = min_excess_threshold
         self.battery_soc_threshold = battery_soc_threshold
         self.min_current = min_current
         self.max_current = max_current
 
-        # State tracking for daily off-after-6pm logic
+        # State tracking for daily off-after-end-time logic
         self.daily_disabled = False
         self.last_reset_date = datetime.date.today()
 
@@ -863,61 +867,60 @@ class TimeBasedController:
             self.daily_disabled = False
             self.last_reset_date = today
 
-    def is_unrestricted_period(self) -> bool:
-        """Check if we're in the unrestricted charging period (00:10-06:00)."""
+    def is_unrestricted_charging_active(self) -> bool:
+        """Check if we're in the unrestricted charging period."""
         self._reset_daily_state_if_needed()
         current_time = datetime.datetime.now(self.timezone).time()
-        return self.fixed_charge_start <= current_time < self.fixed_charge_end
+        return self.unrestricted_start_time <= current_time < self.unrestricted_end_time
 
-    def should_enable_based_on_time(self, excess_power: float, battery_soc: int) -> bool:
-        """Check if charger should be enabled based on time rules."""
+    def should_enable_solar_excess(self, excess_power: float, battery_soc: int) -> bool:
+        """Check if charger should be enabled based on solar excess policy."""
         self._reset_daily_state_if_needed()
         current_time = datetime.datetime.now(self.timezone).time()
 
-        # If already disabled for the day after 6pm, don't re-enable
+        # If already disabled for the day after end time, don't re-enable
         if self.daily_disabled:
             return False
 
-        # Check if within switch-on window (11am-6pm)
-        if self.switch_on_time <= current_time < self.switch_off_time:
+        # Check if within solar excess window
+        if self.solar_excess_start_time <= current_time < self.solar_excess_end_time:
             # Enable if excess > threshold and battery SOC > threshold
             return excess_power > self.min_excess_threshold and battery_soc > self.battery_soc_threshold
 
         return False
 
-    def should_disable_based_on_time(self, excess_power: float) -> bool:
-        """Check if charger should be disabled based on time rules."""
+    def should_disable_solar_excess(self, excess_power: float) -> bool:
+        """Check if charger should be disabled based on solar excess policy."""
         self._reset_daily_state_if_needed()
         current_time = datetime.datetime.now(self.timezone).time()
 
-        # After 6pm, disable if excess becomes negative and mark as disabled for the day
-        if current_time >= self.switch_off_time and excess_power < 0:
+        # After end time, disable if excess becomes negative and mark as disabled for the day
+        if current_time >= self.solar_excess_end_time and excess_power < 0:
             self.daily_disabled = True
             return True
 
         return False
 
-    def get_time_based_current(self, excess_power: float, battery_soc: int, voltage: int, charger_current: int = None) -> tuple[int, bool]:
-        """Get current and state based on time rules. Returns (current, enabled)."""
+    def get_policy_based_current(self, excess_power: float, battery_soc: int, voltage: int, charger_current: int = None) -> tuple[int, bool]:
+        """Get current and state based on time period policies. Returns (current, enabled)."""
         current_time = datetime.datetime.now(self.timezone).time()
         timezone_name = str(self.timezone).split('/')[-1] if '/' in str(self.timezone) else str(self.timezone)
-        if hasattr(self, 'verbose') and self.verbose:
-            print(f"DEBUG TIMEZONE: UTC={datetime.datetime.now(pytz.UTC).time()}, Local({timezone_name})={current_time}, Timezone={self.timezone}")
-            print(f"DEBUG TIME: current_time={current_time}, switch_on={self.switch_on_time}, switch_off={self.switch_off_time}")
-            print(f"DEBUG TIME: is_unrestricted={self.is_unrestricted_period()}")
-            print(f"DEBUG TIME: should_enable={self.should_enable_based_on_time(excess_power, battery_soc)}")
-            print(f"DEBUG TIME: should_disable={self.should_disable_based_on_time(excess_power)}")
+        logger.debug(f"TIMEZONE: UTC={datetime.datetime.now(pytz.UTC).time()}, Local({timezone_name})={current_time}, Timezone={self.timezone}")
+        logger.debug(f"TIME: current_time={current_time}, solar_excess_start={self.solar_excess_start_time}, solar_excess_end={self.solar_excess_end_time}")
+        logger.debug(f"TIME: is_unrestricted_charging_active={self.is_unrestricted_charging_active()}")
+        logger.debug(f"TIME: should_enable_solar_excess={self.should_enable_solar_excess(excess_power, battery_soc)}")
+        logger.debug(f"TIME: should_disable_solar_excess={self.should_disable_solar_excess(excess_power)}")
 
-        if self.is_unrestricted_period():
+        if self.is_unrestricted_charging_active():
             # Unrestricted charging at fixed current
-            if self.fixed_charge_current > 6:  # Only print if enabling
-                print(f"🔌 TIME RULE ({timezone_name}): Unrestricted charging period ({self.fixed_charge_start}-{self.fixed_charge_end}) - Fixed charge at {self.fixed_charge_current}A")
-            return self.fixed_charge_current, True
+            if self.unrestricted_current > 6:  # Only print if enabling
+                print(f"🔌 TIME PERIOD POLICY ({timezone_name}): Unrestricted charging ({self.unrestricted_start_time}-{self.unrestricted_end_time}) - Fixed charge at {self.unrestricted_current}A")
+            return self.unrestricted_current, True
 
-        if self.should_disable_based_on_time(excess_power):
+        if self.should_disable_solar_excess(excess_power):
             return self.min_current, False  # Minimum current, disabled
 
-        if self.should_enable_based_on_time(excess_power, battery_soc):
+        if self.should_enable_solar_excess(excess_power, battery_soc):
             # Calculate based on excess power, but cap appropriately
             calculated_current = min(int(excess_power / voltage), self.max_current)  # Use configured max current
             final_current = max(calculated_current, self.min_current)
@@ -933,7 +936,7 @@ class ChargerController:
                  mqtt_settings: Settings.MQTT, upper_limit=30, lower_limit=6,
                  voltage=240, bus_maximum=7000, buffer=100, is_primary=False,
                  state_change_min_interval=10,
-                 time_controller: TimeBasedController = None):
+                 time_controller: TimePeriodPolicyController = None):
         self.upper_limit = upper_limit
         self.bus_maximum = bus_maximum
         self.lower_limit = lower_limit
@@ -983,7 +986,7 @@ class ChargerController:
                 self.enabled_ha.off()
         
         switch_id = f'{self.charger_name}_use_excess'.lower().replace(' ', '_')
-        print(f'Registering MQTT switch: {switch_id}')
+        logger.debug(f'Registering MQTT switch: {switch_id}')
         
         self.enabled_ha = Switch(Settings(mqtt=self.mqtt_settings, entity=SwitchInfo(
             device=device_info,
@@ -996,7 +999,7 @@ class ChargerController:
         """Setup current and power sensors."""
         # Current sensor
         current_id = f'{self.charger_name}_current'.lower().replace(' ', '_')
-        print(f'Registering MQTT sensor: {current_id}')
+        logger.debug(f'Registering MQTT sensor: {current_id}')
         self.current_ha = Sensor(Settings(mqtt=self.mqtt_settings, entity=SensorInfo(
             name='Current',
             device_class='current',
@@ -1007,7 +1010,7 @@ class ChargerController:
         
         # Power sensor
         power_id = f'{self.charger_name}_power'.lower().replace(' ', '_')
-        print(f'Registering MQTT sensor: {power_id}')
+        logger.debug(f'Registering MQTT sensor: {power_id}')
         self.power_ha = Sensor(Settings(mqtt=self.mqtt_settings, entity=SensorInfo(
             name='Power',
             device_class='power',
@@ -1030,8 +1033,7 @@ class ChargerController:
         self.power_ha.set_state(self.charger_load)
         self.charger_connected = the_charger['message'] in ('Connected to EV', 'Charging', 'Please Wait')
         self.charging = self.charger_load > 100
-        if hasattr(self, 'verbose') and self.verbose:
-            print(f"DEBUG CHARGER STATUS: {self.charger_name} - message='{the_charger.get('message', 'NO_MESSAGE')}', status='{the_charger.get('status', 'NO_STATUS')}', connected={self.charger_connected}, charging={self.charging}, current={self.charger_current}A, power={self.charger_load}W")
+        logger.debug(f"CHARGER STATUS: {self.charger_name} - message='{the_charger.get('message', 'NO_MESSAGE')}', status='{the_charger.get('status', 'NO_STATUS')}', connected={self.charger_connected}, charging={self.charging}, current={self.charger_current}A, power={self.charger_load}W")
 
     def control(self, charger_data: dict, inverter_data: dict, all_controllers: dict) -> tuple[ChargerStatus, Optional[ChargerAction]]:
         """Control charger based on solar/battery conditions with primary/secondary logic.
@@ -1044,35 +1046,32 @@ class ChargerController:
         Returns:
             ChargerStatus: Status information for this charger
         """
-        # Check time-based rules first if time controller is available
+        # Check time period policies first if policy controller is available
         if self.time_controller:
             excess_power = inverter_data['Power/FromSolar'] - inverter_data['Power/ToHome'] - self.buffer
             battery_soc = inverter_data['Battery/SOC']
 
-            # Get time-based current and state
-            time_based_current, time_based_enabled = self.time_controller.get_time_based_current(
+            # Get policy-based current and state
+            policy_based_current, policy_based_enabled = self.time_controller.get_policy_based_current(
                 excess_power, battery_soc, self.voltage, self.charger_current
             )
 
-            # If in unrestricted period or time-based rules apply, use time-based logic
-            if self.time_controller.is_unrestricted_period() or time_based_enabled:
-                if hasattr(self, 'verbose') and self.verbose:
-                    period_type = "unrestricted charging" if self.time_controller.is_unrestricted_period() else "daytime automated charging"
-                    print(f"[debug] {self.charger_name}: Using {period_type} logic - Current: {time_based_current}A, Enabled: {time_based_enabled}")
+            # If in unrestricted charging period or solar excess policy applies, use policy-based logic
+            if self.time_controller.is_unrestricted_charging_active() or policy_based_enabled:
+                period_type = "unrestricted charging" if self.time_controller.is_unrestricted_charging_active() else "solar excess charging"
+                logger.debug(f"{self.charger_name}: Using {period_type} logic - Current: {policy_based_current}A, Enabled: {policy_based_enabled}")
 
-                # Apply time-based changes with detailed logging
+                # Apply policy-based changes with detailed logging
                 values = {
                     'excess_power': f"{excess_power:.0f}W",
                     'battery_soc': f"{battery_soc}%",
                     'time': datetime.datetime.now(self.time_controller.timezone).strftime("%H:%M:%S")
                 }
-                period_type = "unrestricted charging" if self.time_controller.is_unrestricted_period() else "daytime automated charging"
-                reason = f"Time-based rule ({period_type})"
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"DEBUG CHARGER: Before update - current={self.charger_current}A, proposed={time_based_current}A, enabled={time_based_enabled}, connected={self.charger_connected}")
-                action = self._apply_charger_changes(charger_data, time_based_current, time_based_enabled, reason, values)
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"DEBUG CHARGER: After update - current={self.charger_current}A, action={action}")
+                period_type = "unrestricted charging" if self.time_controller.is_unrestricted_charging_active() else "solar excess charging"
+                reason = f"Time period policy ({period_type})"
+                logger.debug(f"CHARGER: Before update - current={self.charger_current}A, proposed={policy_based_current}A, enabled={policy_based_enabled}, connected={self.charger_connected}")
+                action = self._apply_charger_changes(charger_data, policy_based_current, policy_based_enabled, reason, values)
+                logger.debug(f"CHARGER: After update - current={self.charger_current}A, action={action}")
 
                 status = ChargerStatus(
                     name=self.charger_name,
@@ -1081,8 +1080,8 @@ class ChargerController:
                     charging=self.charging,
                     current_amps=self.charger_current,
                     power_watts=self.charger_load,
-                    proposed_amps=time_based_current,
-                    state_active=time_based_enabled
+                    proposed_amps=policy_based_current,
+                    state_active=policy_based_enabled
                 )
                 return status, action
 
@@ -1097,8 +1096,8 @@ class ChargerController:
             power_metrics, total_charger_load, self.bus_maximum, reserve_for_battery
         )
 
-        # Check time-based conditions
-        should_enable, should_disable = self._check_time_conditions(inverter_data)
+        # Check time period policy conditions
+        should_enable, should_disable = self._check_policy_conditions(inverter_data)
 
         # Find primary controller and check if it's actively charging
         primary_is_charging = self._get_primary_charging_status(all_controllers)
@@ -1148,8 +1147,8 @@ class ChargerController:
                 return controller.charger_connected and controller.charging
         return False
 
-    def _check_time_conditions(self, inverter_data: dict) -> tuple[bool, bool]:
-        """Check time-based enable/disable conditions.
+    def _check_policy_conditions(self, inverter_data: dict) -> tuple[bool, bool]:
+        """Check time period policy enable/disable conditions.
         
         Returns:
             tuple: (should_enable, should_disable)
@@ -1243,37 +1242,31 @@ class ChargerController:
         """Calculate current for primary charger."""
         proposed_current = round(available_for_charge / self.voltage)
         
-        if hasattr(self, 'verbose') and self.verbose:
-            print(f"[debug] Primary {self.charger_name}: Available power: {available_for_charge:.0f}W")
-            print(f"[debug] Primary {self.charger_name}: Calculated current: {proposed_current}A (voltage: {self.voltage}V)")
-            print(f"[debug] Primary {self.charger_name}: Current charger setting: {self.charger_current}A")
-            print(f"[debug] Primary {self.charger_name}: Limits: {self.lower_limit}A - {self.upper_limit}A")
+        logger.debug(f"Primary {self.charger_name}: Available power: {available_for_charge:.0f}W")
+        logger.debug(f"Primary {self.charger_name}: Calculated current: {proposed_current}A (voltage: {self.voltage}V)")
+        logger.debug(f"Primary {self.charger_name}: Current charger setting: {self.charger_current}A")
+        logger.debug(f"Primary {self.charger_name}: Limits: {self.lower_limit}A - {self.upper_limit}A")
         
         if proposed_current > self.upper_limit:
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] Primary {self.charger_name}: Clipping {proposed_current}A to upper limit {self.upper_limit}A")
+            logger.debug(f"Primary {self.charger_name}: Clipping {proposed_current}A to upper limit {self.upper_limit}A")
             return self.upper_limit, True
         elif proposed_current < self.lower_limit:
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] Primary {self.charger_name}: {proposed_current}A below minimum, pausing charger")
+            logger.debug(f"Primary {self.charger_name}: {proposed_current}A below minimum, pausing charger")
             return self.lower_limit, False
         else:
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] Primary {self.charger_name}: Setting current to {proposed_current}A, enabling charger")
+            logger.debug(f"Primary {self.charger_name}: Setting current to {proposed_current}A, enabling charger")
             return proposed_current, True
     
     def _calculate_secondary_current(self, available_for_charge: float,
                                    primary_is_charging: bool, all_controllers: dict) -> tuple[int, bool]:
         """Calculate current for secondary charger."""
-        if hasattr(self, 'verbose') and self.verbose:
-            print(f"[debug] Secondary {self.charger_name}: Primary charging: {primary_is_charging}")
-            print(f"[debug] Secondary {self.charger_name}: Available power: {available_for_charge:.0f}W")
-            print(f"[debug] Secondary {self.charger_name}: Current charger setting: {self.charger_current}A")
+        logger.debug(f"Secondary {self.charger_name}: Primary charging: {primary_is_charging}")
+        logger.debug(f"Secondary {self.charger_name}: Available power: {available_for_charge:.0f}W")
+        logger.debug(f"Secondary {self.charger_name}: Current charger setting: {self.charger_current}A")
         
         if primary_is_charging:
             # Primary is charging, secondary gets minimum 6A
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] Secondary {self.charger_name}: Primary active, limiting to minimum {self.lower_limit}A")
+            logger.debug(f"Secondary {self.charger_name}: Primary active, limiting to minimum {self.lower_limit}A")
             return self.lower_limit, True
         else:
             # Primary not charging, secondary can use excess power
@@ -1281,85 +1274,111 @@ class ChargerController:
             secondary_minimum_power = len(secondary_controllers) * self.lower_limit * self.voltage
             available_for_this_secondary = available_for_charge - secondary_minimum_power
             
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] Secondary {self.charger_name}: Other secondaries: {len(secondary_controllers)}")
-                print(f"[debug] Secondary {self.charger_name}: Reserved for others: {secondary_minimum_power}W")
-                print(f"[debug] Secondary {self.charger_name}: Available for this charger: {available_for_this_secondary:.0f}W")
+            logger.debug(f"Secondary {self.charger_name}: Other secondaries: {len(secondary_controllers)}")
+            logger.debug(f"Secondary {self.charger_name}: Reserved for others: {secondary_minimum_power}W")
+            logger.debug(f"Secondary {self.charger_name}: Available for this charger: {available_for_this_secondary:.0f}W")
             
             proposed_current = round(available_for_this_secondary / self.voltage)
             
             if proposed_current > self.upper_limit:
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"[debug] Secondary {self.charger_name}: Clipping {proposed_current}A to upper limit {self.upper_limit}A")
+                logger.debug(f"Secondary {self.charger_name}: Clipping {proposed_current}A to upper limit {self.upper_limit}A")
                 return self.upper_limit, True
             elif proposed_current < self.lower_limit:
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"[debug] Secondary {self.charger_name}: {proposed_current}A below minimum, using minimum {self.lower_limit}A")
+                logger.debug(f"Secondary {self.charger_name}: {proposed_current}A below minimum, using minimum {self.lower_limit}A")
                 return self.lower_limit, True
             else:
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"[debug] Secondary {self.charger_name}: Setting current to {proposed_current}A")
+                logger.debug(f"Secondary {self.charger_name}: Setting current to {proposed_current}A")
                 return proposed_current, True
     
-    def _set_charger_state(self, charger_device, on: bool, charge_rate: int) -> bool:
-        """Set charger on/off state and charge rate.
+    def _set_charger_state(self, charger_device, on: bool, charge_rate: int, policy_type: str = "", time_policy: str = "", values: dict = None) -> bool:
+        """Set charger on/off state and charge rate with comprehensive logging.
 
         Args:
             charger_device: The Emporia charger device object
             on: Whether to turn charger on or off
             charge_rate: Charge rate in amps
+            policy_type: The type of policy that triggered the change
+            time_policy: The specific time policy details
+            values: Dictionary with additional contextual values for logging
 
         Returns:
             bool: True if successful, False otherwise
         """
+        # First get current state for comparison
+        charger_data = {}
+        try:
+            current_chargers = get_emporia_chargers(self.vue)
+            if current_chargers and self.charger_name in current_chargers:
+                current_charger = current_chargers[self.charger_name]
+                current_on = current_charger.get('on', False)
+                current_current = current_charger.get('current', 0)
+                current_message = current_charger.get('message', 'Unknown')
+                current_power = current_charger.get('power', 0)
+                
+                # Print the current state
+                print(f"📊 {self.charger_name} BEFORE: on={current_on}, current={current_current}A, power={current_power:.1f}W, message='{current_message}'")
+            else:
+                print(f"📊 {self.charger_name} BEFORE: Could not retrieve current state")
+        except Exception as e:
+            print(f"Warning: Failed to get current state for {self.charger_name}: {e}")
+        
+        # Apply the changes
         try:
             self.vue.update_charger(charger_device, on=on, charge_rate=charge_rate)
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"DEBUG CHARGER: Successfully set {self.charger_name} to on={on}, rate={charge_rate}A")
-            return True
-        except Exception as e:
-            print(f"Error setting charger state for {self.charger_name}: {e}")
-            return False
-
-    def _verify_charger_state(self, charger_data: dict, expected_on: bool, expected_current: int) -> bool:
-        """Verify that charger is in the expected state by re-reading from API.
-
-        Args:
-            charger_data: Current charger data (will be updated)
-            expected_on: Expected on state
-            expected_current: Expected current
-
-        Returns:
-            bool: True if state matches expected, False otherwise
-        """
-        try:
-            # Re-fetch charger data to verify state
+            
+            # Print comprehensive change information
+            state_change = "ON" if on else "OFF"
+            policy_info = f" | Policy: {policy_type}" if policy_type else ""
+            time_info = f" | {time_policy}" if time_policy else ""
+            
+            print(f"🔌 {self.charger_name}: Setting to {state_change} at {charge_rate}A{policy_info}{time_info}")
+            
+            if values:
+                # Print most important values from the values dictionary
+                if 'excess_power' in values:
+                    print(f"   Excess power: {values['excess_power']}")
+                if 'battery_soc' in values:
+                    print(f"   Battery SOC: {values['battery_soc']}")
+                
+            # Verify the changes were applied
+            time.sleep(1)  # Give API time to process the change
             updated_chargers = get_emporia_chargers(self.vue)
             if updated_chargers and self.charger_name in updated_chargers:
                 updated_charger = updated_chargers[self.charger_name]
                 actual_on = updated_charger.get('on', False)
                 actual_current = updated_charger.get('current', 0)
-
-                # Update our local charger_data with fresh data
+                actual_message = updated_charger.get('message', 'Unknown')
+                actual_power = updated_charger.get('power', 0)
+                
+                # Update charger_data for the caller
                 charger_data[self.charger_name] = updated_charger
-
+                
                 # Update local state
                 self.charger_load = updated_charger['power']
                 self.charger_state = updated_charger['on']
                 self.charger_current = updated_charger['current']
                 self.charger_connected = updated_charger['message'] in ('Connected to EV', 'Charging', 'Please Wait')
                 self.charging = self.charger_load > 100
-
-                if hasattr(self, 'verbose') and self.verbose:
-                    print(f"DEBUG CHARGER: Verified {self.charger_name} - expected: on={expected_on}, rate={expected_current}A | actual: on={actual_on}, rate={actual_current}A")
-
-                return actual_on == expected_on and actual_current == expected_current
+                
+                # Print the new state
+                print(f"📊 {self.charger_name} AFTER: on={actual_on}, current={actual_current}A, power={actual_power:.1f}W, message='{actual_message}'")
+                
+                # Check if the changes were applied correctly
+                if actual_on != on or actual_current != charge_rate:
+                    print(f"⚠️ Warning: Desired state (on={on}, rate={charge_rate}A) differs from actual state (on={actual_on}, rate={actual_current}A)")
+                else:
+                    print(f"✅ Verified: Change applied successfully")
+                    
+                return True
             else:
-                print(f"Warning: Could not verify charger state for {self.charger_name}")
+                print(f"⚠️ Warning: Could not verify state change for {self.charger_name}")
                 return False
+                
         except Exception as e:
-            print(f"Error verifying charger state for {self.charger_name}: {e}")
+            print(f"❌ Error setting charger state for {self.charger_name}: {e}")
             return False
+
+    # Method removed - functionality now incorporated into _set_charger_state
 
     def _apply_charger_changes(self, charger_data: dict, proposed_current: int, proposed_state: bool, reason: str, values: dict) -> Optional[ChargerAction]:
         """Apply charger current changes if needed.
@@ -1376,9 +1395,8 @@ class ChargerController:
         """
         # Only update if charger is connected
         if not self.charger_connected:
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] {self.charger_name}: Not connected, skipping update")
-                print(f"DEBUG CHARGER: Not connected - charger_connected={self.charger_connected}")
+            logger.debug(f"{self.charger_name}: Not connected, skipping update")
+            logger.debug(f"CHARGER: Not connected - charger_connected={self.charger_connected}")
             return None
 
         # For Emporia chargers, we need to handle both on/off state and current
@@ -1394,8 +1412,7 @@ class ChargerController:
         needs_update = (self.charger_current != proposed_current) or (current_charger_on != charger_on)
 
         if not needs_update:
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"DEBUG CHARGER: No change needed - current={self.charger_current}A (on={current_charger_on}), proposed={proposed_current}A (on={charger_on})")
+            logger.debug(f"CHARGER: No change needed - current={self.charger_current}A (on={current_charger_on}), proposed={proposed_current}A (on={charger_on})")
             return None
 
         # Check if this is a state change (on/off) rather than just a current adjustment
@@ -1414,18 +1431,15 @@ class ChargerController:
                 
                 # Still allow current changes within the same state
                 if self.charger_current != proposed_current and current_charger_on == charger_on:
-                    if hasattr(self, 'verbose') and self.verbose:
-                        print(f"DEBUG CHARGER: Still applying current change within same state: {self.charger_current}A -> {proposed_current}A")
+                    logger.debug(f"CHARGER: Still applying current change within same state: {self.charger_current}A -> {proposed_current}A")
                 else:
                     return None
                     
-        if hasattr(self, 'verbose') and self.verbose:
-            print(f"DEBUG CHARGER: State change detected - current={self.charger_current}A (on={current_charger_on}) -> proposed={proposed_current}A (on={charger_on})")
+        logger.debug(f"CHARGER: State change detected - current={self.charger_current}A (on={current_charger_on}) -> proposed={proposed_current}A (on={charger_on})")
 
         try:
             the_charger = charger_data[self.charger_name]
-            if hasattr(self, 'verbose') and self.verbose:
-                print(f"[debug] {self.charger_name}: Updating charger from {self.charger_current}A to {proposed_current}A")
+            logger.debug(f"{self.charger_name}: Updating charger from {self.charger_current}A to {proposed_current}A")
 
             # Log charger state changes to console regardless of verbose mode
             old_state = self.charger_current > self.lower_limit  # Was it enabled (>min_current)?
@@ -1436,46 +1450,49 @@ class ChargerController:
                 action_type = 'state_change'
             else:
                 action_type = 'current_change'
-
+                
+            # Initialize policy variables with default values
+            policy_type = ""
+            time_policy = ""
+            
+            # Get current time info
+            current_time = datetime.datetime.now(self.time_controller.timezone) if self.time_controller else datetime.datetime.now()
+            timezone_name = str(self.time_controller.timezone).split('/')[-1] if self.time_controller and '/' in str(self.time_controller.timezone) else "UTC"
+            
+            # Determine the policy type and time windows - now always calculated
+            if self.time_controller:
+                if self.time_controller.is_unrestricted_charging_active():
+                    policy_type = "Unrestricted charging"
+                    time_policy = f"Unrestricted period: {self.time_controller.unrestricted_start_time.strftime('%H:%M')}-{self.time_controller.unrestricted_end_time.strftime('%H:%M')}"
+                elif self.time_controller.daily_disabled:
+                    policy_type = "Day-end disable"
+                    time_policy = f"Disabled after solar period ({self.time_controller.solar_excess_end_time.strftime('%H:%M')}) until tomorrow"
+                elif new_state:
+                    policy_type = "Solar excess charging"
+                    time_policy = f"Solar excess window: {self.time_controller.solar_excess_start_time.strftime('%H:%M')}-{self.time_controller.solar_excess_end_time.strftime('%H:%M')}"
+                else:
+                    policy_type = "Outside time windows"
+                    time_policy = f"Outside configured time windows"
+            else:
+                policy_type = "Power-based control"
+                time_policy = "No time controller configured"
+            
+            # Additional info for state changes
             if old_state != new_state:
                 state_word = "ON" if new_state else "OFF"
-                current_time = datetime.datetime.now(self.time_controller.timezone) if self.time_controller else datetime.datetime.now()
-                timezone_name = str(self.time_controller.timezone).split('/')[-1] if self.time_controller and '/' in str(self.time_controller.timezone) else "UTC"
 
-                # Determine the policy type and time windows
-                if self.time_controller:
-                    if self.time_controller.is_unrestricted_period():
-                        policy_type = "Unrestricted charging"
-                        time_policy = f"Fixed charge period: {self.time_controller.fixed_charge_start.strftime('%H:%M')}-{self.time_controller.fixed_charge_end.strftime('%H:%M')}"
-                    elif self.time_controller.daily_disabled:
-                        policy_type = "Post-switch-off disable"
-                        time_policy = f"Switch-off time: {self.time_controller.switch_off_time.strftime('%H:%M')} (daily disable active)"
-                    elif new_state:
-                        policy_type = "Daytime automated charging"
-                        time_policy = f"Daytime window: {self.time_controller.switch_on_time.strftime('%H:%M')}-{self.time_controller.switch_off_time.strftime('%H:%M')}"
-                    else:
-                        policy_type = "Outside time windows"
-                        time_policy = f"Outside configured time windows"
-                else:
-                    policy_type = "Power-based control"
-                    time_policy = "No time controller configured"
+            # Set the charger state with policy information
+            success = self._set_charger_state(
+                the_charger['ev_charger'],
+                charger_on,
+                proposed_current,
+                policy_type,
+                time_policy,
+                values
+            )
 
-                print(f"🔌 {self.charger_name}: Switched {state_word} at {proposed_current}A")
-                print(f"   Reason: {reason}")
-                print(f"   Time: {current_time.strftime('%H:%M:%S')} ({timezone_name})")
-                print(f"   Policy: {time_policy}")
-
-            # Set the charger state
-            success = self._set_charger_state(the_charger['ev_charger'], charger_on, proposed_current)
-
+            # Only proceed if the state change was successful
             if success:
-                # Verify the state was set correctly
-                if self._verify_charger_state(charger_data, charger_on, proposed_current):
-                    if hasattr(self, 'verbose') and self.verbose:
-                        print(f"DEBUG CHARGER: State verification successful for {self.charger_name}")
-                else:
-                    print(f"Warning: Charger state verification failed for {self.charger_name}")
-
                 # Update Home Assistant sensor
                 self.current_ha.set_state(proposed_current)
 
@@ -1494,8 +1511,7 @@ class ChargerController:
                 # Update last state change time if this was a state change (on/off)
                 if old_state != new_state:
                     self.last_state_change_time = datetime.datetime.now()
-                    if hasattr(self, 'verbose') and self.verbose:
-                        print(f"DEBUG CHARGER: Updated last state change time for {self.charger_name}")
+                    logger.debug(f"CHARGER: Updated last state change time for {self.charger_name}")
 
                 # Update local state (already done in _verify_charger_state)
                 return action
@@ -1543,26 +1559,26 @@ def main() -> None:
     parser.add_argument(
         "-u", '--username',
         help="MQTT username",
-        default="a",
+        # Don't set a default here as it overrides the config file value
         required=False
     )
     parser.add_argument(
         "-p", '--password',
         help="MQTT password",
-        default="a",
+        # Don't set a default here as it overrides the config file value
         required=False
     )
     parser.add_argument(
         "-s", '--sleep',
         help="Poll delay",
         type=int,
-        default=10
+        # Don't set a default here as it overrides the config file value
     )
     parser.add_argument(
         "-c", '--creds-file',
         help="Emporia creds file",
         type=str,
-        default='keys.json'
+        default='keys.json'  # Keep default for authentication token file
     )
     parser.add_argument(
         "-v", '--verbose',
@@ -1573,71 +1589,76 @@ def main() -> None:
         "--battery-capacity",
         help="Battery capacity in kWh",
         type=float,
-        default=20.0
+        # Don't set a default here as it overrides the config file value
     )
     parser.add_argument(
         "--min-soc",
         help="Minimum battery SOC threshold for depletion calculations",
         type=int,
-        default=30
+        # Don't set a default here as it overrides the config file value
     )
     parser.add_argument(
         "--power-avg-window",
         help="Time window in minutes for averaging battery power demands",
         type=int,
-        default=5
+        # Don't set a default here as it overrides the config file value
     )
     parser.add_argument(
         "--max-power-threshold",
         help="Maximum valid power reading in watts (readings above this will be considered spurious)",
         type=int,
-        default=50000
+        # Don't set a default here as it overrides the config file value
     )
     parser.add_argument(
         "--config",
         help="Path to configuration JSON file",
         type=str,
-        default="config.json"
+        default="config.json"  # Keep default for config file path
     )
     parser.add_argument(
         "--timezone",
         help="Timezone for timestamps (e.g., 'America/New_York', 'Europe/London')",
         type=str
     )
-    # Time-based behavior CLI args
+    # Time period policy CLI args
     parser.add_argument(
-        "--switch-on-time",
-        help="Time to enable charging (e.g., '11:00')",
-        type=str
+        "--solar-excess-start-time",
+        help="Start time for solar excess charging period (e.g., '11:00')",
+        type=str,
+        dest="switch_on_time"  # Keep backward compatibility with existing config files
     )
     parser.add_argument(
-        "--switch-off-time",
-        help="Time to disable charging (e.g., '18:00')",
-        type=str
+        "--solar-excess-end-time",
+        help="End time for solar excess charging period (e.g., '18:00')",
+        type=str,
+        dest="switch_off_time"  # Keep backward compatibility with existing config files
     )
     parser.add_argument(
-        "--fixed-charge-start",
+        "--unrestricted-start-time",
         help="Start time for unrestricted charging period (e.g., '00:10')",
-        type=str
+        type=str,
+        dest="fixed_charge_start"  # Keep backward compatibility with existing config files
     )
     parser.add_argument(
-        "--fixed-charge-end",
+        "--unrestricted-end-time",
         help="End time for unrestricted charging period (e.g., '06:00')",
-        type=str
+        type=str,
+        dest="fixed_charge_end"  # Keep backward compatibility with existing config files
     )
     parser.add_argument(
-        "--fixed-charge-current",
+        "--unrestricted-current",
         help="Current for unrestricted charging period in amps",
-        type=int
+        type=int,
+        dest="fixed_charge_current"  # Keep backward compatibility with existing config files
     )
     parser.add_argument(
         "--min-excess-threshold",
-        help="Minimum excess power threshold in watts for daytime automated charging",
+        help="Minimum excess power threshold in watts for solar excess charging",
         type=int
     )
     parser.add_argument(
         "--battery-soc-threshold",
-        help="Battery SOC threshold in percent for enabling daytime automated charging",
+        help="Battery SOC threshold in percent for enabling solar excess charging",
         type=int
     )
     # Charger limits CLI args
@@ -1702,28 +1723,32 @@ def main() -> None:
     creds_file = get_config_value('system', 'creds_file', 'keys.json', getattr(args, 'creds_file', None))
     sleep_interval = get_config_value('system', 'sleep_interval', 10, getattr(args, 'sleep', None))
     battery_capacity = get_config_value('system', 'battery_capacity', 20.0, getattr(args, 'battery_capacity', None))
-    min_soc = get_config_value('system', 'min_soc', 30, getattr(args, 'min_soc', None))
+    min_soc = get_config_value('system', 'min_soc', 20, getattr(args, 'min_soc', None))
     power_avg_window = get_config_value('system', 'power_avg_window', 5, getattr(args, 'power_avg_window', None))
     max_power_threshold = get_config_value('system', 'max_power_threshold', 50000, getattr(args, 'max_power_threshold', None))
-    timezone_str = get_config_value('time_based_behavior', 'timezone', 'UTC', getattr(args, 'timezone', None))
+    
+    # Try both new and old config section names for backward compatibility
+    config_section = 'time_period_policies' if 'time_period_policies' in config else 'time_based_behavior'
+    timezone_str = get_config_value(config_section, 'timezone', 'UTC', getattr(args, 'timezone', None))
     detailed_log = get_config_value('system', 'detailed_log', False, getattr(args, 'detailed_log', None))
-    print(f"DEBUG: args.timezone: {getattr(args, 'timezone', 'NOT_SET')}")
-    print(f"DEBUG: get_config_value result: {timezone_str}")
+    logger.debug(f"args.timezone: {getattr(args, 'timezone', 'NOT_SET')}")
+    logger.debug(f"get_config_value result: {timezone_str}")
     verbose = getattr(args, 'verbose', False)
-    # Time-based behavior config
-    switch_on_time = get_config_value('time_based_behavior', 'switch_on_time', '11:00', getattr(args, 'switch_on_time', None))
-    switch_off_time = get_config_value('time_based_behavior', 'switch_off_time', '18:00', getattr(args, 'switch_off_time', None))
-    fixed_charge_start = get_config_value('time_based_behavior', 'fixed_charge_start', '00:10', getattr(args, 'fixed_charge_start', None))
-    fixed_charge_end = get_config_value('time_based_behavior', 'fixed_charge_end', '06:00', getattr(args, 'fixed_charge_end', None))
-    fixed_charge_current = get_config_value('time_based_behavior', 'fixed_charge_current', 40, getattr(args, 'fixed_charge_current', None))
-    min_excess_threshold = get_config_value('time_based_behavior', 'min_excess_threshold', 1440, getattr(args, 'min_excess_threshold', None))
-    battery_soc_threshold = get_config_value('time_based_behavior', 'battery_soc_threshold', 85, getattr(args, 'battery_soc_threshold', None))
+    
+    # Time period policy config
+    switch_on_time = get_config_value(config_section, 'switch_on_time', '11:00', getattr(args, 'switch_on_time', None))
+    switch_off_time = get_config_value(config_section, 'switch_off_time', '18:00', getattr(args, 'switch_off_time', None))
+    fixed_charge_start = get_config_value(config_section, 'fixed_charge_start', '00:10', getattr(args, 'fixed_charge_start', None))
+    fixed_charge_end = get_config_value(config_section, 'fixed_charge_end', '06:00', getattr(args, 'fixed_charge_end', None))
+    fixed_charge_current = get_config_value(config_section, 'fixed_charge_current', 40, getattr(args, 'fixed_charge_current', None))
+    min_excess_threshold = get_config_value(config_section, 'min_excess_threshold', 1440, getattr(args, 'min_excess_threshold', None))
+    battery_soc_threshold = get_config_value(config_section, 'battery_soc_threshold', 85, getattr(args, 'battery_soc_threshold', None))
 
     # Setup timezone
-    print(f"DEBUG: timezone_str from config: '{timezone_str}'")
+    logger.debug(f"timezone_str from config: '{timezone_str}'")
     try:
         timezone = pytz.timezone(timezone_str)
-        print(f"DEBUG: Configured timezone: {timezone_str} -> {timezone}")
+        logger.debug(f"Configured timezone: {timezone_str} -> {timezone}")
     except pytz.exceptions.UnknownTimeZoneError:
         print(f"Warning: Unknown timezone '{timezone_str}', falling back to UTC")
         timezone = pytz.UTC
@@ -1748,25 +1773,37 @@ def main() -> None:
 
     mqtt_settings = Settings.MQTT(host=mqtt_broker, username=mqtt_username, password=mqtt_password)
     
-    # Set verbose flags on functions
-    get_inverter_data.verbose = verbose
-    get_emporia_chargers.verbose = verbose
-    PowerCalculator.verbose = verbose
+    # Configure root logger first (for all libraries)
+    logging.basicConfig(level=logging.WARNING, format='%(message)s')
+    
+    # Specifically silence ha-mqtt-discoverable
+    logging.getLogger('ha_mqtt_discoverable').setLevel(logging.ERROR)
+    
+    # Configure our specific logger
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+    
+    # Add a console handler with simple format
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(message)s'))
+    logger.addHandler(console_handler)
 
-    # Create time-based controller
-    time_controller = TimeBasedController(
-        switch_on_time=switch_on_time,
-        switch_off_time=switch_off_time,
-        fixed_charge_start=fixed_charge_start,
-        fixed_charge_end=fixed_charge_end,
-        fixed_charge_current=fixed_charge_current,
+    # Create time period policy controller
+    time_controller = TimePeriodPolicyController(
+        solar_excess_start_time=switch_on_time,
+        solar_excess_end_time=switch_off_time,
+        unrestricted_start_time=fixed_charge_start,
+        unrestricted_end_time=fixed_charge_end,
+        unrestricted_current=fixed_charge_current,
         min_excess_threshold=min_excess_threshold,
         battery_soc_threshold=battery_soc_threshold,
         timezone=timezone,
         min_current=min_current,
         max_current=max_current
     )
-    time_controller.verbose = verbose  # Set verbose flag on time controller
+    # Time controller is now configured via logging
     
     # Setup inverter sensors using OO approach
     inverter_sensors = InverterSensorManager(mqtt_settings)
@@ -1820,7 +1857,7 @@ def main() -> None:
             state_change_min_interval=state_change_min_interval,
             time_controller=time_controller
         )
-        controller.verbose = verbose  # Set verbose flag on controller
+        # Controller is now configured via logging
         controllers[charger_name] = controller
         
         if verbose:
@@ -1828,10 +1865,9 @@ def main() -> None:
 
     # Initialize the power validator with the configured threshold
     power_validator = PowerValidator(max_power_threshold=max_power_threshold)
-    power_validator.verbose = verbose  # Set verbose flag on validator
+    # No need to set verbose flag, uses logging now
 
-    if verbose:
-        print(f"[debug] Initialized power validator with threshold: {max_power_threshold}W")
+    logger.debug(f"Initialized power validator with threshold: {max_power_threshold}W")
     
     while True:
         inverter_data = get_inverter_data(solax_ip, solax_serial)
@@ -1882,15 +1918,13 @@ def main() -> None:
         charger_actions = []
         for controller in controllers.values():
             controller.update(charger_data)
-            if verbose:
-                print(f"[debug] Controlling {controller.charger_name}: Connected={controller.charger_connected}, Current={controller.charger_current}A, Power={controller.charger_load:.0f}W")
+            logger.debug(f"Controlling {controller.charger_name}: Connected={controller.charger_connected}, Current={controller.charger_current}A, Power={controller.charger_load:.0f}W")
             status, action = controller.control(charger_data, inverter_data, controllers)
             charger_statuses.append(status)
             if action:
                 charger_actions.append(action)
             
-        if verbose:
-            print(f"[debug] Completed control cycle for {len(controllers)} chargers")
+        logger.debug(f"Completed control cycle for {len(controllers)} chargers")
         
         # Calculate system-wide metrics
         total_charger_power = sum(status.power_watts for status in charger_statuses)

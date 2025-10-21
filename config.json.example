@@ -11,12 +11,12 @@
   "chargers": {
     "primary_charger": "Garage Charger"
   },
-  "time_based_behavior": {
-    "switch_on_time": "11:00",
-    "switch_off_time": "18:00",
-    "fixed_charge_start": "00:10",
-    "fixed_charge_end": "06:00",
-    "fixed_charge_current": 40,
+  "time_period_policies": {
+    "solar_excess_start_time": "11:00",
+    "solar_excess_end_time": "18:00",
+    "unrestricted_start_time": "00:10",
+    "unrestricted_end_time": "06:00",
+    "unrestricted_current": 40,
     "min_excess_threshold": 1440,
     "battery_soc_threshold": 85,
     "timezone": "Europe/London"
