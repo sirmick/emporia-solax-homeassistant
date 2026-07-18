@@ -844,7 +844,8 @@ class TimePeriodPolicyController:
     def __init__(self, solar_excess_start_time="11:00", solar_excess_end_time="18:00",
                  unrestricted_start_time="00:10", unrestricted_end_time="06:00",
                  unrestricted_current=40, min_excess_threshold=1440,
-                 battery_soc_threshold=85, timezone=None, min_current=6, max_current=30):
+                 battery_soc_threshold=85, timezone=None, min_current=6, max_current=30,
+                 enable_unrestricted_charging=True, solar_excess_mode="dynamic"):
         self.timezone = timezone or pytz.UTC
         self.solar_excess_start_time = datetime.datetime.strptime(solar_excess_start_time, "%H:%M").time()
         self.solar_excess_end_time = datetime.datetime.strptime(solar_excess_end_time, "%H:%M").time()
@@ -855,6 +856,13 @@ class TimePeriodPolicyController:
         self.battery_soc_threshold = battery_soc_threshold
         self.min_current = min_current
         self.max_current = max_current
+        self.enable_unrestricted_charging = enable_unrestricted_charging
+        
+        # Solar excess mode can be "dynamic" (based on excess power) or "time_window" (just based on time)
+        self.solar_excess_mode = solar_excess_mode
+        if self.solar_excess_mode not in ["dynamic", "time_window"]:
+            print(f"Warning: Invalid solar_excess_mode '{solar_excess_mode}', defaulting to 'dynamic'")
+            self.solar_excess_mode = "dynamic"
 
         # State tracking for daily off-after-end-time logic
         self.daily_disabled = False
@@ -868,10 +876,23 @@ class TimePeriodPolicyController:
             self.last_reset_date = today
 
     def is_unrestricted_charging_active(self) -> bool:
-        """Check if we're in the unrestricted charging period."""
+        """Check if we're in the unrestricted charging period and it's enabled."""
+        # If unrestricted charging is disabled, always return False
+        if not self.enable_unrestricted_charging:
+            return False
+            
         self._reset_daily_state_if_needed()
         current_time = datetime.datetime.now(self.timezone).time()
-        return self.unrestricted_start_time <= current_time < self.unrestricted_end_time
+        
+        # Handle time windows that span midnight
+        if self.unrestricted_start_time <= self.unrestricted_end_time:
+            # Normal case: start time is before end time (e.g., 10:00 to 14:00)
+            is_in_time = self.unrestricted_start_time <= current_time < self.unrestricted_end_time
+        else:
+            # Overnight case: start time is after end time (e.g., 22:00 to 06:00)
+            is_in_time = (current_time >= self.unrestricted_start_time) or (current_time < self.unrestricted_end_time)
+        
+        return is_in_time
 
     def should_enable_solar_excess(self, excess_power: float, battery_soc: int) -> bool:
         """Check if charger should be enabled based on solar excess policy."""
@@ -884,8 +905,13 @@ class TimePeriodPolicyController:
 
         # Check if within solar excess window
         if self.solar_excess_start_time <= current_time < self.solar_excess_end_time:
-            # Enable if excess > threshold and battery SOC > threshold
-            return excess_power > self.min_excess_threshold and battery_soc > self.battery_soc_threshold
+            # For time_window mode, just enable if within the time window
+            if self.solar_excess_mode == "time_window":
+                return True
+                
+            # For dynamic mode, enable if excess > threshold and battery SOC > threshold
+            elif self.solar_excess_mode == "dynamic":
+                return excess_power > self.min_excess_threshold and battery_soc > self.battery_soc_threshold
 
         return False
 
@@ -894,10 +920,17 @@ class TimePeriodPolicyController:
         self._reset_daily_state_if_needed()
         current_time = datetime.datetime.now(self.timezone).time()
 
-        # After end time, disable if excess becomes negative and mark as disabled for the day
-        if current_time >= self.solar_excess_end_time and excess_power < 0:
-            self.daily_disabled = True
-            return True
+        # For time_window mode, only disable if outside the time window
+        if self.solar_excess_mode == "time_window":
+            if current_time >= self.solar_excess_end_time or current_time < self.solar_excess_start_time:
+                return True
+            return False
+            
+        # For dynamic mode, after end time, disable if excess becomes negative and mark as disabled for the day
+        elif self.solar_excess_mode == "dynamic":
+            if current_time >= self.solar_excess_end_time and excess_power < 0:
+                self.daily_disabled = True
+                return True
 
         return False
 
@@ -907,15 +940,26 @@ class TimePeriodPolicyController:
         timezone_name = str(self.timezone).split('/')[-1] if '/' in str(self.timezone) else str(self.timezone)
         logger.debug(f"TIMEZONE: UTC={datetime.datetime.now(pytz.UTC).time()}, Local({timezone_name})={current_time}, Timezone={self.timezone}")
         logger.debug(f"TIME: current_time={current_time}, solar_excess_start={self.solar_excess_start_time}, solar_excess_end={self.solar_excess_end_time}")
+        logger.debug(f"TIME: current_time={current_time}, unrestricted_start_time={self.unrestricted_start_time}, unrestricted_end_time={self.unrestricted_end_time}")
+        logger.debug(f"TIME: unrestricted_charging_enabled={self.enable_unrestricted_charging}")
+        logger.debug(f"TIME: solar_excess_mode={self.solar_excess_mode}")
         logger.debug(f"TIME: is_unrestricted_charging_active={self.is_unrestricted_charging_active()}")
         logger.debug(f"TIME: should_enable_solar_excess={self.should_enable_solar_excess(excess_power, battery_soc)}")
         logger.debug(f"TIME: should_disable_solar_excess={self.should_disable_solar_excess(excess_power)}")
 
-        if self.is_unrestricted_charging_active():
-            # Unrestricted charging at fixed current
-            if self.unrestricted_current > 6:  # Only print if enabling
-                print(f"🔌 TIME PERIOD POLICY ({timezone_name}): Unrestricted charging ({self.unrestricted_start_time}-{self.unrestricted_end_time}) - Fixed charge at {self.unrestricted_current}A")
-            return self.unrestricted_current, True
+        # Check if we're in the unrestricted charging time window
+        current_in_window = self.unrestricted_start_time <= current_time < self.unrestricted_end_time
+        
+        if current_in_window:
+            if not self.enable_unrestricted_charging:
+                # We're in the unrestricted window but it's disabled
+                print(f"🔌 TIME PERIOD POLICY ({timezone_name}): Unrestricted charging disabled by configuration (would be active {self.unrestricted_start_time}-{self.unrestricted_end_time})")
+                # Fall through to other charging policies
+            else:
+                # Unrestricted charging at fixed current
+                if self.unrestricted_current > 6:  # Only print if enabling
+                    print(f"🔌 TIME PERIOD POLICY ({timezone_name}): Unrestricted charging ({self.unrestricted_start_time}-{self.unrestricted_end_time}) - Fixed charge at {self.unrestricted_current}A")
+                return self.unrestricted_current, True
 
         if self.should_disable_solar_excess(excess_power):
             return self.min_current, False  # Minimum current, disabled
@@ -1692,6 +1736,18 @@ def main() -> None:
         help="Enable detailed JSON logging to poll_log.json (off by default)",
         action="store_true"
     )
+    parser.add_argument(
+        "--enable-unrestricted-charging",
+        help="Enable unrestricted charging during configured time period (default: true)",
+        type=lambda x: (str(x).lower() in ['true', '1', 'yes', 'y']),
+        default=None
+    )
+    parser.add_argument(
+        "--solar-excess-mode",
+        help="Mode for solar excess charging: 'dynamic' (based on excess power) or 'time_window' (based only on time window)",
+        choices=["dynamic", "time_window"],
+        default=None
+    )
     
     args = parser.parse_args()
 
@@ -1738,11 +1794,13 @@ def main() -> None:
     # Time period policy config
     switch_on_time = get_config_value(config_section, 'switch_on_time', '11:00', getattr(args, 'switch_on_time', None))
     switch_off_time = get_config_value(config_section, 'switch_off_time', '18:00', getattr(args, 'switch_off_time', None))
-    fixed_charge_start = get_config_value(config_section, 'fixed_charge_start', '00:10', getattr(args, 'fixed_charge_start', None))
-    fixed_charge_end = get_config_value(config_section, 'fixed_charge_end', '06:00', getattr(args, 'fixed_charge_end', None))
-    fixed_charge_current = get_config_value(config_section, 'fixed_charge_current', 40, getattr(args, 'fixed_charge_current', None))
+    fixed_charge_start = get_config_value(config_section, 'unrestricted_start_time', '00:10', getattr(args, 'fixed_charge_start', None))
+    fixed_charge_end = get_config_value(config_section, 'unrestricted_end_time', '06:00', getattr(args, 'fixed_charge_end', None))
+    fixed_charge_current = get_config_value(config_section, 'unrestricted_current', 40, getattr(args, 'fixed_charge_current', None))
     min_excess_threshold = get_config_value(config_section, 'min_excess_threshold', 1440, getattr(args, 'min_excess_threshold', None))
     battery_soc_threshold = get_config_value(config_section, 'battery_soc_threshold', 85, getattr(args, 'battery_soc_threshold', None))
+    enable_unrestricted_charging = get_config_value(config_section, 'enable_unrestricted_charging', True, getattr(args, 'enable_unrestricted_charging', None))
+    solar_excess_mode = get_config_value(config_section, 'solar_excess_mode', 'dynamic', getattr(args, 'solar_excess_mode', None))
 
     # Setup timezone
     logger.debug(f"timezone_str from config: '{timezone_str}'")
@@ -1801,7 +1859,9 @@ def main() -> None:
         battery_soc_threshold=battery_soc_threshold,
         timezone=timezone,
         min_current=min_current,
-        max_current=max_current
+        max_current=max_current,
+        enable_unrestricted_charging=enable_unrestricted_charging,
+        solar_excess_mode=solar_excess_mode
     )
     # Time controller is now configured via logging
     

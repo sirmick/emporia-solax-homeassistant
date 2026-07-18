@@ -19,7 +19,9 @@
     "unrestricted_current": 40,
     "min_excess_threshold": 1440,
     "battery_soc_threshold": 85,
-    "timezone": "Europe/London"
+    "timezone": "Europe/London",
+    "enable_unrestricted_charging": true,
+    "solar_excess_mode": "dynamic"
   },
   "charger_limits": {
     "max_current": 30,

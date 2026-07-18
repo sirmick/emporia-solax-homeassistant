@@ -66,7 +66,9 @@ You can configure the script using a JSON configuration file (`config.json`):
     "unrestricted_current": 40,
     "min_excess_threshold": 1440,
     "battery_soc_threshold": 85,
-    "timezone": "Europe/London"
+    "timezone": "Europe/London",
+    "enable_unrestricted_charging": true,
+    "solar_excess_mode": "dynamic"
   },
   "charger_limits": {
     "max_current": 30,
@@ -153,6 +155,8 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 - `--unrestricted-current`: Current for unrestricted charging period in amps (default: 40)
 - `--min-excess-threshold`: Minimum excess power threshold in watts for solar excess charging (default: 1440)
 - `--battery-soc-threshold`: Battery SOC threshold in percent for enabling solar excess charging (default: 85)
+- `--enable-unrestricted-charging`: Enable or disable unrestricted charging during configured time period (default: true)
+- `--solar-excess-mode`: Mode for solar excess charging: 'dynamic' (based on excess power) or 'time_window' (based only on time window) (default: 'dynamic')
 
 ### Examples
 
@@ -209,13 +213,18 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 5. **Battery Protection**: Reserves power for battery charging when SOC is below thresholds
 6. **Time Period Policies**: Two distinct charging policies based on time of day:
    - **Unrestricted Charging**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
-   - **Solar Excess Charging**: During daylight hours (default 11am-6pm), operates with these rules:
-     * Only enables charging when BOTH conditions are true:
-       1. Excess solar power exceeds minimum threshold (default 1440W)
-       2. Battery SOC is above minimum threshold (default 85%)
-     * Current is calculated dynamically based on available excess power
-     * If available power drops below minimum current threshold, charging is paused
-     * After solar excess end time (default 6pm), charging is disabled if battery begins discharging
+   - **Solar Excess Charging**: During daylight hours (default 11am-6pm), operates in one of two modes:
+     * **Dynamic Mode** (default): Responds to real-time solar production and battery status
+       * Only enables charging when BOTH conditions are true:
+         1. Excess solar power exceeds minimum threshold (default 1440W)
+         2. Battery SOC is above minimum threshold (default 85%)
+       * Current is calculated dynamically based on available excess power
+       * If available power drops below minimum current threshold, charging is paused
+       * After solar excess end time (default 6pm), charging is disabled if battery begins discharging
+     * **Time Window Mode**: Simpler operation based only on time of day
+       * Enables charging at start time and disables at end time
+       * Ignores excess power and battery SOC conditions
+       * Useful for predictable charging schedules regardless of solar conditions
    - **Outside Hours**: Charging is disabled by default outside of these specific time windows unless manually controlled.
 
 ## Logging Output
