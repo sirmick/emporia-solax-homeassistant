@@ -1855,6 +1855,8 @@ def main() -> None:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(console_handler)
+    # Own handler above; don't also bubble up to basicConfig's root handler (double lines)
+    logger.propagate = False
 
     # Create time period policy controller
     time_controller = TimePeriodPolicyController(
