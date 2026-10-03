@@ -629,6 +629,14 @@ class SystemStatus:
         return " | ".join(log_parts)
 
 
+def hhmm_to_minutes(hhmm: str):
+    """'HH:MM' -> minutes for HA duration sensors; 'None' (HA's unknown payload) for 'N/A'."""
+    if hhmm == "N/A":
+        return "None"
+    hours, minutes = hhmm.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
 class InverterSensorManager:
     """Manages MQTT sensors for solar inverter data."""
     
@@ -652,7 +660,7 @@ class InverterSensorManager:
             ('Power/ToHome', 'power', 'W'),
             ('Battery/SOC', 'battery', '%'),
             ('Battery/Voltage', 'voltage', 'V'),
-            ('Battery/Temperature', 'temperature', 'C'),
+            ('Battery/Temperature', 'temperature', '°C'),
             ('Battery/TimeToCharged', 'duration', 'min'),
             ('Battery/TimeToDepleted', 'duration', 'min'),
             ('Battery/Power', 'power', 'kW'),
@@ -1034,7 +1042,7 @@ class ChargerController:
         
         self.enabled_ha = Switch(Settings(mqtt=self.mqtt_settings, entity=SwitchInfo(
             device=device_info,
-            name=f'{self.charger_name} Use Excess Solar',
+            name='Use Excess Solar',
             unique_id=switch_id,
         )), switch_enabled)
         self.enabled_ha.off()
@@ -1962,8 +1970,8 @@ def main() -> None:
             inverter_sensors.update_sensor(key, value, verbose=verbose)
 
         # Update new battery time sensors
-        inverter_sensors.update_sensor('Battery/TimeToCharged', time_to_charged, verbose=verbose)
-        inverter_sensors.update_sensor('Battery/TimeToDepleted', time_to_depleted, verbose=verbose)
+        inverter_sensors.update_sensor('Battery/TimeToCharged', hhmm_to_minutes(time_to_charged), verbose=verbose)
+        inverter_sensors.update_sensor('Battery/TimeToDepleted', hhmm_to_minutes(time_to_depleted), verbose=verbose)
         inverter_sensors.update_sensor('Battery/Power', avg_battery_power, verbose=verbose)
         inverter_sensors.update_sensor('Battery/MinSOC', min_soc, verbose=verbose)
 
