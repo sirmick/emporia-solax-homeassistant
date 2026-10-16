@@ -265,7 +265,7 @@ class ChargePolicy:
         flat = self._flat(f)
         if f.soc < c.battery_stop_soc:
             budget = 0.0
-        self.budget_w = budget
+        self.budget_w = max(0.0, budget)  # for display; a deficit shows as the surplus
         avail = max(0.0, budget) / c.voltage
         probed = False
 
