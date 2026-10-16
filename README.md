@@ -6,9 +6,9 @@ A Python script that polls data from a Solax solar inverter and Emporia Vue ener
 
 - **Real-time Solar Monitoring**: Collects live data from Solax inverters including solar production, battery status, and grid interaction
 - **EV Charger Control**: Automatically adjusts Emporia EV charger current based on solar excess power
-- **Smart Battery Management**: Reserves battery power for charging when SOC is low, optimizes for solar self-consumption
+- **Battery First**: The cars only get solar that would otherwise be exported (or throttled away), never the battery's charge
 - **Home Assistant Integration**: Publishes all metrics to MQTT with auto-discovery for easy HA setup
-- **Primary/Secondary Charger Support**: Handles multiple EV chargers with priority logic
+- **Charger Priority**: Multiple chargers share the solar surplus, primary first
 - **Comprehensive Logging**: Detailed status logging with battery time estimates and power flow visualization
 - **Power Validation**: Filters out spurious readings to ensure reliable operation
 
@@ -58,23 +58,19 @@ You can configure the script using a JSON configuration file (`config.json`):
   "chargers": {
     "primary_charger": "Garage Charger"
   },
-  "time_period_policies": {
-    "solar_excess_start_time": "11:00",
-    "solar_excess_end_time": "18:00",
-    "unrestricted_start_time": "00:10",
-    "unrestricted_end_time": "06:00",
-    "unrestricted_current": 40,
-    "min_excess_threshold": 1440,
-    "battery_soc_threshold": 85,
+  "charge_policy": {
     "timezone": "Europe/London",
-    "enable_unrestricted_charging": true,
-    "solar_excess_mode": "dynamic"
-  },
-  "charger_limits": {
-    "max_current": 30,
+    "night_start": "00:10",
+    "night_end": "05:00",
+    "night_current": 40,
+    "battery_first_soc": 95,
+    "battery_stop_soc": 90,
+    "battery_full_soc": 99,
+    "battery_reserve_w": 1000,
+    "no_grid_after": "15:00",
     "min_current": 6,
-    "on_to_off_lockout": 60,
-    "off_to_on_lockout": 240
+    "max_current": 30,
+    "min_start_interval_s": 1800
   },
   "system": {
     "battery_capacity": 20.0,
@@ -83,14 +79,38 @@ You can configure the script using a JSON configuration file (`config.json`):
     "max_power_threshold": 50000,
     "sleep_interval": 10,
     "creds_file": "keys.json",
-    "timezone": "Europe/London",
-    "bus_maximum": 7000,
-    "buffer": 100
+    "detailed_log": false
   }
 }
 ```
 
-All options in the configuration file have corresponding command-line arguments. Command-line arguments take precedence over configuration file settings.
+The `solax`, `mqtt`, `chargers` and `system` basics also have command-line arguments (see below), which take
+precedence over the file. The charging rules live in `charge_policy` only; every key is optional.
+
+#### `charge_policy` keys
+
+| Key | Default | Meaning |
+|---|---|---|
+| `timezone` | `UTC` | All times below are local to this zone |
+| `night_start` / `night_end` | `00:10` / `05:00` | Night window: every charger on at `night_current` |
+| `night_current` | `40` | Amps per charger in the night window (capped at the charger's own maximum) |
+| `battery_first_soc` | `95` | A stopped charger only starts on solar at or above this battery SOC |
+| `battery_stop_soc` | `90` | Below this SOC running chargers lose their solar budget |
+| `battery_full_soc` | `99` | Below this, the battery keeps at least `battery_reserve_w` of charge before the cars get any |
+| `battery_reserve_w` | `1000` | See above |
+| `no_grid_after` | `15:00` | From here until midnight: stop quickly when solar can't cover the minimum, then stay off until the night window |
+| `min_current` / `max_current` | `6` / `30` | Solar current range per charger |
+| `voltage` | `240` | Used to turn watts into amps |
+| `margin_w` | `100` | Deadband: the current holds while the surplus is between 0 and this |
+| `avg_window_s` | `120` | Surplus averaging window |
+| `settle_s` | `60` | After any command, wait this long before adjusting current again |
+| `start_delay_s` | `300` | Surplus must cover `min_current` this long before a charger starts |
+| `stop_delay_s` | `300` | Before `no_grid_after`: how long a charger holds at the minimum through a dip before stopping |
+| `late_stop_delay_s` | `60` | The same, after `no_grid_after` |
+| `min_start_interval_s` | `1800` | Minimum time between two starts of the same charger |
+| `full_after_s` / `idle_power_w` | `300` / `100` | A charger that is on and plugged in but draws under `idle_power_w` this long is treated as "car full" until unplugged or the next night |
+| `probe_step_a` | `1` | Step used to probe upwards when the inverter may be throttling solar (see below) |
+| `resend_s` | `300` | An identical command that didn't take effect is re-sent at most this often |
 
 ### Emporia Vue Setup
 
@@ -140,23 +160,8 @@ python poll.py <inverter_ip> <serial_number> <mqtt_broker> <primary_charger_name
 - `--timezone`: Timezone for timestamps (e.g., 'America/New_York', 'Europe/London')
 - `--config`: Path to configuration JSON file (default: 'config.json')
 
-#### Charger Limits Options
-- `--max-current`: Maximum charging current in amps (default: 30)
-- `--min-current`: Minimum charging current in amps (default: 6)
-- `--bus-maximum`: Maximum power the AC bus can handle in watts (default: 7000)
-- `--buffer`: Power buffer in watts to maintain as safety margin (default: 100)
-- `--state-change-min-interval`: Minimum time in minutes between charger on/off state changes (default: 10)
-
-#### Time Period Policy Options
-- `--solar-excess-start-time`: Start time for solar excess charging period (e.g., '11:00')
-- `--solar-excess-end-time`: End time for solar excess charging period (e.g., '18:00')
-- `--unrestricted-start-time`: Start time for unrestricted charging period (e.g., '00:10')
-- `--unrestricted-end-time`: End time for unrestricted charging period (e.g., '06:00')
-- `--unrestricted-current`: Current for unrestricted charging period in amps (default: 40)
-- `--min-excess-threshold`: Minimum excess power threshold in watts for solar excess charging (default: 1440)
-- `--battery-soc-threshold`: Battery SOC threshold in percent for enabling solar excess charging (default: 85)
-- `--enable-unrestricted-charging`: Enable or disable unrestricted charging during configured time period (default: true)
-- `--solar-excess-mode`: Mode for solar excess charging: 'dynamic' (based on excess power) or 'time_window' (based only on time window) (default: 'dynamic')
+- `--dry-run`: Read everything and log what the policy would do, without commanding the chargers or publishing to
+  MQTT. Safe to run next to a live instance.
 
 ### Examples
 
@@ -180,7 +185,7 @@ python poll.py --config my-solar-setup.json --verbose
 ```bash
 # Use config file but override specific options
 python poll.py --config config.json \
-  --timezone "America/Chicago" --max-current 32 --verbose
+  --timezone "America/Chicago" --dry-run
 ```
 
 ## MQTT Topics
@@ -198,7 +203,10 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 ### EV Charger Data
 - `homeassistant/sensor/<charger_name>/current`
 - `homeassistant/sensor/<charger_name>/power`
-- `homeassistant/switch/<charger_name>/use_excess_solar`
+- `homeassistant/sensor/<charger_name>/charge_policy` (what the policy is doing, e.g. `solar 14A`,
+  `waiting: battery 87% < 95%`, `done until night window`)
+- `homeassistant/switch/<charger_name>/use_excess_solar` (on by default at start-up; off keeps that charger out of
+  solar charging, the night window still applies)
 
 ### Battery Time Estimates
 - `homeassistant/sensor/solax/battery_time_to_charged`
@@ -206,26 +214,31 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 
 ## How It Works
 
-1. **Data Collection**: Polls Solax inverter and Emporia Vue API every 10 seconds
-2. **Power Calculation**: Calculates available solar excess after house load and battery reserve
-3. **Charger Control**: Adjusts EV charger current based on excess power availability
-4. **Priority Logic**: Primary chargers get priority, secondary chargers share remaining power
-5. **Battery Protection**: Reserves power for battery charging when SOC is below thresholds
-6. **Time Period Policies**: Two distinct charging policies based on time of day:
-   - **Unrestricted Charging**: During nighttime hours (default 12:10am-6am), charges at a fixed rate (default 40A) regardless of solar production or battery status. Ideal for off-peak electricity rates.
-   - **Solar Excess Charging**: During daylight hours (default 11am-6pm), operates in one of two modes:
-     * **Dynamic Mode** (default): Responds to real-time solar production and battery status
-       * Only enables charging when BOTH conditions are true:
-         1. Excess solar power exceeds minimum threshold (default 1440W)
-         2. Battery SOC is above minimum threshold (default 85%)
-       * Current is calculated dynamically based on available excess power
-       * If available power drops below minimum current threshold, charging is paused
-       * After solar excess end time (default 6pm), charging is disabled if battery begins discharging
-     * **Time Window Mode**: Simpler operation based only on time of day
-       * Enables charging at start time and disables at end time
-       * Ignores excess power and battery SOC conditions
-       * Useful for predictable charging schedules regardless of solar conditions
-   - **Outside Hours**: Charging is disabled by default outside of these specific time windows unless manually controlled.
+Every `sleep_interval` seconds the script reads the inverter and the chargers, publishes everything to MQTT, and asks
+the charge policy (`charge_policy.py`, pure logic with unit tests) what each charger should do.
+
+**Night window** (default 00:10-05:00): every charger is switched on at `night_current`, plugged in or not, so a car
+connected during the window starts straight away. Keeping the house battery out of it is the inverter's job (for
+example a Solax TOU "Battery off" slot over the same hours).
+
+**The rest of the day is solar only, battery first:**
+
+1. **Surplus** = grid export − grid import − battery discharge − any shortfall below `battery_reserve_w` of battery
+   charge (while SOC < `battery_full_soc`), averaged over `avg_window_s`. In self-use mode the inverter feeds loads
+   before the battery, so this is what stops a car from quietly taking the battery's charge.
+2. **Budget** = what the chargers are drawing + the surplus (less `margin_w`), or nothing below `battery_stop_soc`.
+3. Chargers share the budget in priority order, the primary first. A charger with an unplugged or full car, or with
+   its "Use Excess Solar" switch off, gets nothing and is switched off (so plugging a car in never starts an
+   unplanned charge).
+4. A stopped charger starts at `min_current` once SOC ≥ `battery_first_soc`, its share has covered `min_current` for
+   `start_delay_s`, and at least `min_start_interval_s` has passed since its last start. It then follows its share.
+5. A running charger whose share drops below `min_current` holds at the minimum for `stop_delay_s` (rides out a
+   cloud), then stops.
+6. From `no_grid_after` until midnight it stops after `late_stop_delay_s` instead, and stays off until the next
+   night window: the sun is going and the grid shouldn't top the car up.
+7. If the battery is full and nothing is flowing to or from the grid or battery, the inverter may be throttling
+   solar (export-limited setups). The policy then probes upwards `probe_step_a` amps at a time and backs off as soon
+   as import or battery discharge appears.
 
 ## Logging Output
 

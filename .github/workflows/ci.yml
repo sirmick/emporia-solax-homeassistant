@@ -32,11 +32,14 @@ jobs:
         flake8 poll.py --count --select=E9,F63,F7,F82 --show-source --statistics
         flake8 poll.py --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
 
-    - name: Check formatting with black
-      run: black --check --diff poll.py
-
-    - name: Check import sorting with isort
-      run: isort --check-only --diff poll.py
+    - name: Lint charge policy and tests
+      run: |
+        flake8 charge_policy.py tests --max-line-length=120
+        black --check charge_policy.py tests
+        isort --check-only charge_policy.py tests
 
     - name: Test syntax
-      run: python -m py_compile poll.py
+      run: python -m py_compile poll.py charge_policy.py
+
+    - name: Unit tests
+      run: pytest -q tests

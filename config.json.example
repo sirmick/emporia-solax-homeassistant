@@ -11,22 +11,19 @@
   "chargers": {
     "primary_charger": "Garage Charger"
   },
-  "time_period_policies": {
-    "solar_excess_start_time": "11:00",
-    "solar_excess_end_time": "18:00",
-    "unrestricted_start_time": "00:10",
-    "unrestricted_end_time": "06:00",
-    "unrestricted_current": 40,
-    "min_excess_threshold": 1440,
-    "battery_soc_threshold": 85,
+  "charge_policy": {
     "timezone": "Europe/London",
-    "enable_unrestricted_charging": true,
-    "solar_excess_mode": "dynamic"
-  },
-  "charger_limits": {
-    "max_current": 30,
+    "night_start": "00:10",
+    "night_end": "05:00",
+    "night_current": 40,
+    "battery_first_soc": 95,
+    "battery_stop_soc": 90,
+    "battery_full_soc": 99,
+    "battery_reserve_w": 1000,
+    "no_grid_after": "15:00",
     "min_current": 6,
-    "state_change_min_interval": 10
+    "max_current": 30,
+    "min_start_interval_s": 1800
   },
   "system": {
     "battery_capacity": 20.0,
@@ -35,9 +32,6 @@
     "max_power_threshold": 50000,
     "sleep_interval": 10,
     "creds_file": "keys.json",
-    "timezone": "Europe/London",
-    "bus_maximum": 7000,
-    "buffer": 100,
     "detailed_log": false
   }
 }
