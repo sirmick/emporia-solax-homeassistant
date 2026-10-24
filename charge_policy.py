@@ -20,8 +20,10 @@ Rules (all times local):
       whose car is full or unplugged gets nothing and is switched off.
     - A running charger below ``min_current`` holds at the minimum for
       ``stop_delay_s`` (rides out a cloud), then stops. From ``no_grid_after``
-      it stops after ``late_stop_delay_s`` instead and stays off until the next
-      night window: the sun is going and the grid must not top it up.
+      it stops after ``late_stop_delay_s`` instead: the grid must not top it
+      up. Either way it may start again under the normal start rules, so a
+      passing cloud doesn't end the day, while a fading sun simply never
+      covers the minimum again.
     - With the battery full and nothing flowing to or from the grid, the
       inverter may be throttling solar (no-export setups). The policy then
       probes upwards ``probe_step_a`` at a time and backs off as soon as import
@@ -47,7 +49,7 @@ class PolicyConfig:
     battery_stop_soc: int = 90  # ...and running chargers lose their budget below this
     battery_full_soc: int = 99  # below this the battery keeps battery_reserve_w of charge
     battery_reserve_w: int = 1000
-    no_grid_after: str = "15:00"  # from here: stop quickly, stay off until the night window
+    no_grid_after: str = "15:00"  # from here: stop after late_stop_delay_s, not stop_delay_s
     min_current: int = 6
     max_current: int = 30  # solar cap per charger (night uses night_current)
     voltage: int = 240
@@ -107,7 +109,6 @@ class _State:
     below_since: Optional[float] = None  # running below min_current since
     idle_since: Optional[float] = None  # ON + plugged in but not drawing since
     full: bool = False
-    done_today: bool = False
     night: bool = False  # currently on because of the night window
     status: str = ""
     sent: Optional[Tuple[bool, int, float]] = None  # last (on, current, time) sent
@@ -196,7 +197,7 @@ class ChargePolicy:
         cmds = []
         for r in chargers:
             st = self.states[r.name]
-            st.done_today = st.full = False
+            st.full = False
             st.night = True
             st.above_since = st.below_since = st.idle_since = None
             amps = min(self.cfg.night_current, r.max_rate)
@@ -242,9 +243,6 @@ class ChargePolicy:
             elif not r.solar_enabled:
                 st.status = "solar charging disabled"
                 off(r, st, "solar charging disabled")
-            elif st.done_today:
-                st.status = "done until night window"
-                off(r, st, "done until night window")
             elif st.full:
                 st.status = "car full"
                 off(r, st, "car full")
@@ -289,11 +287,10 @@ class ChargePolicy:
                 delay = c.late_stop_delay_s if late else c.stop_delay_s
                 left = delay - (t - st.below_since)
                 if left <= 0:
-                    st.status = "done until night window" if late else "stopped: not enough solar"
+                    st.status = "stopped: not enough solar"
                     reason = f"budget {budget:.0f}W below {c.min_current}A"
                     if late:
-                        st.done_today = True
-                        reason += " after " + c.no_grid_after + ", done until night window"
+                        reason += f" (after {c.no_grid_after}, fast stop)"
                     off(r, st, reason)
                     continue
                 st.status = f"holding {c.min_current}A, stop in {_mins(left)}"

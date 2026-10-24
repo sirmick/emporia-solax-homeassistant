@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a battery charge reserve all count against the budget.
 - Primary charger takes priority; the secondary gets the remainder and now pauses too.
 - On/off is limited by a minimum interval between starts; dips are ridden out at the minimum current, and after
-  `no_grid_after` a charger stops quickly and stays off until the night window.
+  `no_grid_after` a charger stops quickly (it may still restart under the normal start rules if the sun comes back).
 - Chargers left on while unplugged are switched off outside the night window.
 - The "Use Excess Solar" switch now actually enables/disables solar charging per charger (on at start-up).
 

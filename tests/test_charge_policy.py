@@ -181,21 +181,35 @@ def test_cloud_before_cutoff_holds_then_stops_and_waits_30min_to_restart():
     assert all((b - a).total_seconds() >= 1800 for a, b in zip(all_starts, all_starts[1:]))
 
 
-def test_after_cutoff_stops_fast_and_stays_off_until_night():
+def test_after_cutoff_stops_fast_but_restarts_when_the_sun_returns():
     site = Site(solar=5000, house=1000, soc=100)
     site.cars["Back"].plugged = False
     p = make()
-    _, now = run(site, p, at("15:30"), 15)
-    assert site.chargers["Front"]["on"]
-    site.solar = 1500
+    issued, now = run(site, p, at("15:30"), 15)
+    started = starts(issued, "Front")[0]
+    site.solar = 1500  # a cloud
     before = site.battery_out_wh + site.import_wh
     _, now = run(site, p, now, 3)
     assert not site.chargers["Front"]["on"]
     assert site.battery_out_wh + site.import_wh - before < 300  # ~1 minute at the minimum, not 5
-    site.solar = 6000  # sun pops out again later
-    _, now = run(site, p, now, 60)
+    site.solar = 6000  # sun pops out again; exporting it would be a waste
+    issued, now = run(site, p, now, 60)
+    assert site.chargers["Front"]["on"]
+    again = starts(issued, "Front")
+    assert again and (again[0] - started).total_seconds() >= 1800
+
+
+def test_fading_sun_after_cutoff_stays_off():
+    site = Site(solar=5000, house=1000, soc=100)
+    site.cars["Back"].plugged = False
+    p = make()
+    _, now = run(site, p, at("16:00"), 15)
+    assert site.chargers["Front"]["on"]
+    for solar in (3000, 2000, 1500, 800, 300, 0):
+        site.solar = solar
+        issued, now = run(site, p, now, 20)
     assert not site.chargers["Front"]["on"]
-    assert p.status("Front") == "done until night window"
+    assert not starts(issued, "Front")
     _, now = run(site, p, at("00:15", day=17), 1)
     assert site.chargers["Front"]["on"]
 

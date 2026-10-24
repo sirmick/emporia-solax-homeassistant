@@ -98,7 +98,7 @@ precedence over the file. The charging rules live in `charge_policy` only; every
 | `battery_stop_soc` | `90` | Below this SOC running chargers lose their solar budget |
 | `battery_full_soc` | `99` | Below this, the battery keeps at least `battery_reserve_w` of charge before the cars get any |
 | `battery_reserve_w` | `1000` | See above |
-| `no_grid_after` | `15:00` | From here until midnight: stop quickly when solar can't cover the minimum, then stay off until the night window |
+| `no_grid_after` | `15:00` | From here until midnight: stop quickly (after `late_stop_delay_s`) when solar can't cover the minimum |
 | `min_current` / `max_current` | `6` / `30` | Solar current range per charger |
 | `voltage` | `240` | Used to turn watts into amps |
 | `margin_w` | `100` | Deadband: the current holds while the surplus is between 0 and this |
@@ -204,7 +204,7 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
 - `homeassistant/sensor/<charger_name>/current`
 - `homeassistant/sensor/<charger_name>/power`
 - `homeassistant/sensor/<charger_name>/charge_policy` (what the policy is doing, e.g. `solar 14A`,
-  `waiting: battery 87% < 95%`, `done until night window`)
+  `waiting: battery 87% < 95%`, `stopped: not enough solar`)
 - `homeassistant/switch/<charger_name>/use_excess_solar` (on by default at start-up; off keeps that charger out of
   solar charging, the night window still applies)
 
@@ -234,8 +234,9 @@ example a Solax TOU "Battery off" slot over the same hours).
    `start_delay_s`, and at least `min_start_interval_s` has passed since its last start. It then follows its share.
 5. A running charger whose share drops below `min_current` holds at the minimum for `stop_delay_s` (rides out a
    cloud), then stops.
-6. From `no_grid_after` until midnight it stops after `late_stop_delay_s` instead, and stays off until the next
-   night window: the sun is going and the grid shouldn't top the car up.
+6. From `no_grid_after` until midnight it stops after `late_stop_delay_s` instead, so the grid doesn't top the car
+   up. It can still start again under rule 4 if the sun comes back (a passing cloud doesn't end the day); as the
+   sun fades the share simply never covers the minimum again.
 7. If the battery is full and nothing is flowing to or from the grid or battery, the inverter may be throttling
    solar (export-limited setups). The policy then probes upwards `probe_step_a` amps at a time and backs off as soon
    as import or battery discharge appears.
