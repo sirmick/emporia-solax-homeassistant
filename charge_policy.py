@@ -18,12 +18,18 @@ Rules (all times local):
       than ``min_start_interval_s`` after its previous start.
     - Chargers share the budget in priority order (primary first); a charger
       whose car is full or unplugged gets nothing and is switched off.
+    - Watts become amps at each car's measured watts per amp (its draw over
+      its set current, learnt while it charges), not at the nominal
+      ``voltage``: a car offered 6A may really take ~5A, and judging it at
+      ``voltage`` would call a balanced site short of the minimum. ``voltage``
+      is the fallback until a car has been seen charging.
     - A running charger below ``min_current`` holds at the minimum for
-      ``stop_delay_s`` (rides out a cloud), then stops. From ``no_grid_after``
-      it stops after ``late_stop_delay_s`` instead: the grid must not top it
-      up. Either way it may start again under the normal start rules, so a
-      passing cloud doesn't end the day, while a fading sun simply never
-      covers the minimum again.
+      ``stop_delay_s`` (rides out a cloud or a house load spike), then stops.
+      From ``no_grid_after``, or with the battery under ``battery_stop_soc``,
+      it stops after ``late_stop_delay_s`` instead: neither the grid nor a
+      low battery should top it up. Either way it may start again under the
+      normal start rules, so a passing cloud doesn't end the day, while a
+      fading sun simply never covers the minimum again.
     - With the battery full and nothing flowing to or from the grid, the
       inverter may be throttling solar (no-export setups). The policy then
       probes upwards ``probe_step_a`` at a time and backs off as soon as import
@@ -52,14 +58,14 @@ class PolicyConfig:
     no_grid_after: str = "15:00"  # from here: stop after late_stop_delay_s, not stop_delay_s
     min_current: int = 6
     max_current: int = 30  # solar cap per charger (night uses night_current)
-    voltage: int = 240
+    voltage: int = 240  # watts per amp until a car's real draw has been measured
     margin_w: int = 100  # surplus deadband: hold the current while 0 <= surplus < margin
     avg_window_s: int = 120  # surplus averaging window
     settle_s: int = 60  # after any command, wait this long before adjusting current again
     start_delay_s: int = 300
-    stop_delay_s: int = 300
+    stop_delay_s: int = 1800
     late_stop_delay_s: int = 60
-    min_start_interval_s: int = 1800
+    min_start_interval_s: int = 300
     full_after_s: int = 300  # ON + plugged in + drawing under idle_power_w this long = car full
     idle_power_w: int = 100
     probe_step_a: int = 1
@@ -109,6 +115,7 @@ class _State:
     below_since: Optional[float] = None  # running below min_current since
     idle_since: Optional[float] = None  # ON + plugged in but not drawing since
     full: bool = False
+    w_per_a: Optional[float] = None  # this car's measured draw per amp of set current
     night: bool = False  # currently on because of the night window
     status: str = ""
     sent: Optional[Tuple[bool, int, float]] = None  # last (on, current, time) sent
@@ -158,6 +165,26 @@ class ChargePolicy:
         """Battery full and nothing moving to/from grid or battery: solar may be throttled."""
         c = self.cfg
         return f.soc >= c.battery_full_soc and abs(f.grid_w) < c.margin_w and abs(f.battery_w) < c.margin_w
+
+    def _learn(self, r: ChargerReading, st: _State, t: float):
+        """Update the car's watts per amp from a settled reading while it charges.
+
+        Not at night (cars often cap themselves below night_current) and not
+        until settle_s after a command (the draw lags the new current). A car
+        capping itself in the day reads low, which over-offers amps for a few
+        steps until the current comes down to what it really takes.
+        """
+        c = self.cfg
+        if st.night or not r.on or r.current <= 0 or r.power_w < c.idle_power_w:
+            return
+        if st.sent is not None and t - st.sent[2] < c.settle_s:
+            return
+        w = min(1.1 * c.voltage, max(0.5 * c.voltage, r.power_w / r.current))
+        st.w_per_a = w if st.w_per_a is None else (st.w_per_a + w) / 2
+
+    def w_per_a(self, name: str) -> float:
+        st = self.states.get(name)
+        return st.w_per_a if st and st.w_per_a else float(self.cfg.voltage)
 
     def _ordered(self, chargers: List[ChargerReading]) -> List[ChargerReading]:
         rank = {n: i for i, n in enumerate(self.priority)}
@@ -218,13 +245,16 @@ class ChargePolicy:
             if r.on:
                 cmds.append(Command(r.name, False, c.min_current, reason))
 
-        # Car-full detection, unplug resets.
+        # Car-full detection, watts-per-amp learning, unplug resets.
         for r in chargers:
             st = self.states[r.name]
             if not r.connected:
                 st.full = False
                 st.idle_since = None
-            elif r.on and r.power_w < c.idle_power_w:
+                st.w_per_a = None  # the next car may draw differently
+                continue
+            self._learn(r, st, t)
+            if r.on and r.power_w < c.idle_power_w:
                 st.idle_since = st.idle_since if st.idle_since is not None else t
                 if t - st.idle_since >= c.full_after_s:
                     st.full = True
@@ -264,18 +294,20 @@ class ChargePolicy:
         if f.soc < c.battery_stop_soc:
             budget = 0.0
         self.budget_w = max(0.0, budget)  # for display; a deficit shows as the surplus
-        avail = max(0.0, budget) / c.voltage
+        avail = max(0.0, budget)  # watts left to hand out, in priority order
+        fast_stop = late or f.soc < c.battery_stop_soc
         probed = False
 
         for r in candidates:
             st = self.states[r.name]
             cap = min(c.max_current, r.max_rate)
+            wpa = self.w_per_a(r.name)
             if r.on:
-                share = min(cap, avail)
+                share = min(cap, avail / wpa)
                 if flat and not probed and s >= 0 and f.soc >= c.battery_stop_soc:
                     share = max(share, min(cap, r.current + c.probe_step_a))
                     probed = True
-                avail = max(0.0, avail - share)
+                avail = max(0.0, avail - share * wpa)
                 if share >= c.min_current:
                     st.below_since = None
                     amps = max(c.min_current, min(cap, round(share)))
@@ -284,13 +316,15 @@ class ChargePolicy:
                         cmds.append(Command(r.name, True, amps, f"solar budget {budget:.0f}W"))
                     continue
                 st.below_since = st.below_since if st.below_since is not None else t
-                delay = c.late_stop_delay_s if late else c.stop_delay_s
+                delay = c.late_stop_delay_s if fast_stop else c.stop_delay_s
                 left = delay - (t - st.below_since)
                 if left <= 0:
                     st.status = "stopped: not enough solar"
                     reason = f"budget {budget:.0f}W below {c.min_current}A"
                     if late:
                         reason += f" (after {c.no_grid_after}, fast stop)"
+                    elif fast_stop:
+                        reason += f" (battery under {c.battery_stop_soc}%, fast stop)"
                     off(r, st, reason)
                     continue
                 st.status = f"holding {c.min_current}A, stop in {_mins(left)}"
@@ -309,7 +343,7 @@ class ChargePolicy:
                 st.above_since = None
                 st.status = f"waiting: next start in {_mins(c.min_start_interval_s - since_start)}"
                 continue
-            share = min(cap, avail)
+            share = min(cap, avail / wpa)
             if flat and not probed and s >= 0:
                 share = max(share, c.min_current)
                 probed = True
@@ -317,7 +351,7 @@ class ChargePolicy:
                 st.above_since = None
                 st.status = f"waiting: surplus {max(0, budget) / 1000:.1f}kW"
                 continue
-            avail = max(0.0, avail - share)
+            avail = max(0.0, avail - share * wpa)
             st.above_since = st.above_since if st.above_since is not None else t
             left = c.start_delay_s - (t - st.above_since)
             if left > 0:

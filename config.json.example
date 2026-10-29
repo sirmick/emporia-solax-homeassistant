@@ -23,7 +23,7 @@
     "no_grid_after": "15:00",
     "min_current": 6,
     "max_current": 30,
-    "min_start_interval_s": 1800
+    "min_start_interval_s": 300
   },
   "system": {
     "battery_capacity": 20.0,

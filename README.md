@@ -70,7 +70,7 @@ You can configure the script using a JSON configuration file (`config.json`):
     "no_grid_after": "15:00",
     "min_current": 6,
     "max_current": 30,
-    "min_start_interval_s": 1800
+    "min_start_interval_s": 300
   },
   "system": {
     "battery_capacity": 20.0,
@@ -100,14 +100,14 @@ precedence over the file. The charging rules live in `charge_policy` only; every
 | `battery_reserve_w` | `1000` | See above |
 | `no_grid_after` | `15:00` | From here until midnight: stop quickly (after `late_stop_delay_s`) when solar can't cover the minimum |
 | `min_current` / `max_current` | `6` / `30` | Solar current range per charger |
-| `voltage` | `240` | Used to turn watts into amps |
+| `voltage` | `240` | Watts per amp for a car not yet seen charging; after that each car's measured draw per amp is used |
 | `margin_w` | `100` | Deadband: the current holds while the surplus is between 0 and this |
 | `avg_window_s` | `120` | Surplus averaging window |
 | `settle_s` | `60` | After any command, wait this long before adjusting current again |
 | `start_delay_s` | `300` | Surplus must cover `min_current` this long before a charger starts |
-| `stop_delay_s` | `300` | Before `no_grid_after`: how long a charger holds at the minimum through a dip before stopping |
-| `late_stop_delay_s` | `60` | The same, after `no_grid_after` |
-| `min_start_interval_s` | `1800` | Minimum time between two starts of the same charger |
+| `stop_delay_s` | `1800` | Before `no_grid_after`: how long a charger holds at the minimum through a dip (cloud, house load spike) before stopping |
+| `late_stop_delay_s` | `60` | The same, after `no_grid_after` or with the battery under `battery_stop_soc` |
+| `min_start_interval_s` | `300` | Minimum time between two starts of the same charger |
 | `full_after_s` / `idle_power_w` | `300` / `100` | A charger that is on and plugged in but draws under `idle_power_w` this long is treated as "car full" until unplugged or the next night |
 | `probe_step_a` | `1` | Step used to probe upwards when the inverter may be throttling solar (see below) |
 | `resend_s` | `300` | An identical command that didn't take effect is re-sent at most this often |
@@ -227,15 +227,18 @@ example a Solax TOU "Battery off" slot over the same hours).
    charge (while SOC < `battery_full_soc`), averaged over `avg_window_s`. In self-use mode the inverter feeds loads
    before the battery, so this is what stops a car from quietly taking the battery's charge.
 2. **Budget** = what the chargers are drawing + the surplus (less `margin_w`), or nothing below `battery_stop_soc`.
-3. Chargers share the budget in priority order, the primary first. A charger with an unplugged or full car, or with
-   its "Use Excess Solar" switch off, gets nothing and is switched off (so plugging a car in never starts an
-   unplanned charge).
+3. Chargers share the budget in priority order, the primary first. Watts become amps at each car's measured draw
+   per amp (its power over its set current, learnt while it charges and forgotten on unplug); a car offered 6A
+   often takes less than 6 × `voltage`, and judging it at `voltage` would stop it on a balanced site. A charger
+   with an unplugged or full car, or with its "Use Excess Solar" switch off, gets nothing and is switched off (so
+   plugging a car in never starts an unplanned charge).
 4. A stopped charger starts at `min_current` once SOC ≥ `battery_first_soc`, its share has covered `min_current` for
    `start_delay_s`, and at least `min_start_interval_s` has passed since its last start. It then follows its share.
 5. A running charger whose share drops below `min_current` holds at the minimum for `stop_delay_s` (rides out a
-   cloud), then stops.
-6. From `no_grid_after` until midnight it stops after `late_stop_delay_s` instead, so the grid doesn't top the car
-   up. It can still start again under rule 4 if the sun comes back (a passing cloud doesn't end the day); as the
+   cloud or a house load spike), then stops.
+6. From `no_grid_after` until midnight, or with the battery under `battery_stop_soc`, it stops after
+   `late_stop_delay_s` instead, so neither the grid nor a low battery tops the car up. It can still start again
+   under rule 4 if the sun comes back (a passing cloud doesn't end the day); as the
    sun fades the share simply never covers the minimum again.
 7. If the battery is full and nothing is flowing to or from the grid or battery, the inverter may be throttling
    solar (export-limited setups). The policy then probes upwards `probe_step_a` amps at a time and backs off as soon

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-28
+
+### Changed
+- Watts are turned into amps at each car's measured draw per amp instead of the nominal `voltage` (now only the
+  fallback for a car not yet seen charging). A car taking ~1230W at 6A was judged short of the minimum on a
+  balanced site and stopped.
+- `stop_delay_s` 300 -> 1800: a dip before `no_grid_after` (cloud, house load spike) is ridden out for 30 minutes.
+  With the battery under `battery_stop_soc` the fast `late_stop_delay_s` applies instead.
+- `min_start_interval_s` 1800 -> 300: a stopped charger can restart 5 minutes after its last start, so the surplus
+  isn't exported for half an hour after a stop.
+
 ## [2.0.0] - 2026-10-16
 
 ### Changed

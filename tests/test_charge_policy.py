@@ -21,9 +21,10 @@ STEP = 10
 
 
 class Car:
-    def __init__(self, plugged=True, full=False):
+    def __init__(self, plugged=True, full=False, w_per_a=240.0):
         self.plugged = plugged
         self.full = full
+        self.w_per_a = w_per_a  # what it really draws per amp offered
 
 
 class Site:
@@ -40,7 +41,7 @@ class Site:
 
     def draw(self, name):
         ch, car = self.chargers[name], self.cars[name]
-        return ch["current"] * 240.0 if ch["on"] and car.plugged and not car.full else 0.0
+        return ch["current"] * car.w_per_a if ch["on"] and car.plugged and not car.full else 0.0
 
     def flows(self):
         load = self.house + sum(self.draw(n) for n in self.cars)
@@ -158,27 +159,72 @@ def test_not_enough_for_minimum_never_starts():
     assert not starts(issued, "Front") and not starts(issued, "Back")
 
 
-def test_cloud_before_cutoff_holds_then_stops_and_waits_30min_to_restart():
+def test_cloud_before_cutoff_holds_30min_then_stops_and_restarts_after_5min():
     site = Site(solar=5000, house=1000, soc=100)
     p = make()
     site.cars["Back"].plugged = False
     issued, now = run(site, p, at("11:00"), 15)
     assert site.chargers["Front"]["on"]
     site.solar = 1500  # cloud
-    issued, now = run(site, p, now, 3)
+    issued, now = run(site, p, now, 25)
     assert site.chargers["Front"] == {"on": True, "current": 6}  # holding the minimum
-    issued, now = run(site, p, now, 4)
+    issued, now = run(site, p, now, 6)
     assert not site.chargers["Front"]["on"]
     stopped = now
     site.solar = 5000  # sun back
-    issued, now = run(site, p, now, 10)
-    assert not site.chargers["Front"]["on"]
-    assert "next start" in p.status("Front")
-    issued, now = run(site, p, now, 30)
+    issued, now = run(site, p, now, 15)
     first = starts(issued, "Front")
-    assert first and (first[0] - stopped).total_seconds() >= 15 * 60
+    # 5 min of sustained surplus; the 5 min since the last start long passed
+    assert first and 4 * 60 <= (first[0] - stopped).total_seconds() <= 7 * 60
     all_starts = sorted(starts(issued, "Front"))
-    assert all((b - a).total_seconds() >= 1800 for a, b in zip(all_starts, all_starts[1:]))
+    assert all((b - a).total_seconds() >= 300 for a, b in zip(all_starts, all_starts[1:]))
+
+
+def test_house_load_spike_before_cutoff_does_not_stop_the_car():
+    # 2026-10-28 14:15: a ~5 min house spike pushed the site into import and
+    # the 5 min hold stopped the car, then ~1.8kW was exported for 30 min.
+    site = Site(solar=2800, house=1000, soc=100)
+    site.cars["Back"].plugged = False
+    p = make()
+    _, now = run(site, p, at("13:30"), 15)
+    assert site.chargers["Front"]["on"]
+    site.house = 2300
+    _, now = run(site, p, now, 6)
+    assert site.chargers["Front"]["on"]
+    site.house = 1000
+    _, now = run(site, p, now, 10)
+    assert site.chargers["Front"]["on"]
+
+
+def test_car_drawing_under_nominal_at_6a_keeps_running_after_cutoff():
+    # 2026-10-28 15:01: the Front car takes ~1230W at 6A (205 W/A). Judged at
+    # 240 W/A a balanced site looked short of 6A and the fast stop fired.
+    site = Site(solar=3000, house=1100, soc=100)
+    site.cars["Front"].w_per_a = 205.0
+    site.cars["Back"].plugged = False
+    p = make()
+    issued, now = run(site, p, at("14:30"), 15)
+    assert starts(issued, "Front")
+    site.solar = 2600  # ~270W spare at 6A x 205 W/A, ~40W short at 240 W/A
+    issued, now = run(site, p, now, 30)  # well past 15:00
+    assert not [c for _, c in issued if not c.on]
+    assert site.chargers["Front"]["on"] and 6 <= site.chargers["Front"]["current"] <= 8
+    assert 195 <= p.w_per_a("Front") <= 215
+
+
+def test_start_uses_the_cars_measured_draw():
+    site = Site(solar=2400, house=1000, soc=100)  # 1.4kW spare: < 6A x 240, > 6A x 205
+    site.cars["Front"].w_per_a = 205.0
+    site.cars["Back"].plugged = False
+    p = make()
+    issued, _ = run(site, p, at("11:00"), 30)
+    assert not starts(issued, "Front")  # unknown car: judged at 240 W/A
+    p.states["Front"].w_per_a = 205.0  # as learnt on an earlier run
+    issued, _ = run(site, p, at("11:30"), 10)
+    assert starts(issued, "Front")
+    site.cars["Front"].plugged = False
+    run(site, p, at("11:40"), 1)
+    assert p.w_per_a("Front") == 240.0  # forgotten on unplug
 
 
 def test_after_cutoff_stops_fast_but_restarts_when_the_sun_returns():
@@ -196,7 +242,7 @@ def test_after_cutoff_stops_fast_but_restarts_when_the_sun_returns():
     issued, now = run(site, p, now, 60)
     assert site.chargers["Front"]["on"]
     again = starts(issued, "Front")
-    assert again and (again[0] - started).total_seconds() >= 1800
+    assert again and (again[0] - started).total_seconds() >= 300
 
 
 def test_fading_sun_after_cutoff_stays_off():
