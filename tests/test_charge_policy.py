@@ -115,6 +115,17 @@ def test_night_window_end_switches_off_immediately():
     assert not site.chargers["Front"]["on"] and not site.chargers["Back"]["on"]
 
 
+def test_night_window_car_refusing_charge_shows_full_not_unplugged():
+    p = make()
+    readings = [
+        ChargerReading("Front", True, True, 40, 0.0, refusing=True),
+        ChargerReading("Back", False, True, 40, 0.0),
+    ]
+    assert p.step(at("02:30"), Flows(0.0, 0.0, 50), readings) == []
+    assert p.status("Front") == "night (car full)"
+    assert p.status("Back") == "night (not plugged in)"
+
+
 def test_battery_first_soc_gate():
     site = Site(solar=8000, house=1000, soc=90)
     site.battery_rate = 0  # pretend full-rate limited, so there is export

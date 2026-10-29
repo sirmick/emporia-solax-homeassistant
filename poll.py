@@ -739,7 +739,8 @@ class PowerCalculator:
         return 0.0
 
 
-CONNECTED_MESSAGES = ('Connected to EV', 'Charging', 'Please Wait')
+CONNECTED_MESSAGES = ('Connected to EV', 'Charging', 'Please Wait', 'EV is not accepting charge')
+REFUSING_MESSAGES = ('EV is not accepting charge',)
 
 
 class ChargerEntities:
@@ -811,6 +812,7 @@ def charger_readings(charger_data: dict, entities: Dict[str, ChargerEntities]) -
             power_w=float(ch['power'] or 0),
             max_rate=int(ch.get('max_charging_rate') or 48),
             solar_enabled=entities[name].solar_enabled if name in entities else True,
+            refusing=ch['message'] in REFUSING_MESSAGES,
         ))
     return readings
 

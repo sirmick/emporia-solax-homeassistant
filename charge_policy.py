@@ -98,6 +98,7 @@ class ChargerReading:
     power_w: float
     max_rate: int = 48
     solar_enabled: bool = True  # the HA "Use Excess Solar" switch
+    refusing: bool = False  # plugged in, but the charger says the car won't take charge (full or its own limit)
 
 
 @dataclass
@@ -228,7 +229,12 @@ class ChargePolicy:
             st.night = True
             st.above_since = st.below_since = st.idle_since = None
             amps = min(self.cfg.night_current, r.max_rate)
-            st.status = f"night {amps}A" if r.connected else "night (not plugged in)"
+            if not r.connected:
+                st.status = "night (not plugged in)"
+            elif r.refusing:
+                st.status = "night (car full)"
+            else:
+                st.status = f"night {amps}A"
             if not r.on or r.current != amps:
                 cmds.append(Command(r.name, True, amps, "night window"))
         return cmds

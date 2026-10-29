@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-10-29
+
+### Fixed
+- A charger reporting "EV is not accepting charge" (car full, or stopped at its own limit) was treated as unplugged:
+  the status read "not plugged in" and, outside the night window, the car's learnt watts per amp was thrown away.
+  It now counts as plugged in; the night status reads "night (car full)" and during the day the usual car-full
+  detection applies.
+
 ## [2.1.0] - 2026-10-28
 
 ### Changed
