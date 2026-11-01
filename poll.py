@@ -744,11 +744,15 @@ REFUSING_MESSAGES = ('EV is not accepting charge',)
 
 
 class ChargerEntities:
-    """Home Assistant entities for one charger: the solar switch plus current/power/policy sensors."""
+    """Home Assistant entities for one charger: solar + unrestricted switches, current/power/policy sensors."""
 
-    def __init__(self, charger_name: str, mqtt_settings: Settings.MQTT):
+    def __init__(self, charger_name: str, mqtt_settings: Settings.MQTT, unrestricted_hours: float = 24,
+                 tz: datetime.tzinfo = pytz.UTC):
         self.name = charger_name
+        self.tz = tz
         self.solar_enabled = True
+        self.unrestricted_hours = unrestricted_hours
+        self.unrestricted_until: Optional[float] = None  # epoch seconds while the Unrestricted switch is on
         slug = charger_name.lower().replace(' ', '_')
         device_info = DeviceInfo(name=charger_name, identifiers=slug)
 
@@ -770,6 +774,27 @@ class ChargerEntities:
             unique_id=f'{slug}_use_excess',
         )), switch_changed)
         self.solar_ha.on()
+
+        def unrestricted_changed(client: Client, user_data, message: MQTTMessage):
+            payload = message.payload.decode()
+            if payload == "ON":
+                self.unrestricted_until = time.time() + self.unrestricted_hours * 3600
+                self.unrestricted_ha.on()
+                print(f"🔀 {self.name}: unrestricted charging for {self.unrestricted_hours:g}h from Home Assistant")
+            elif payload == "OFF":
+                self.unrestricted_until = None
+                self.unrestricted_ha.off()
+                print(f"🔀 {self.name}: unrestricted charging off from Home Assistant")
+
+        # "Unrestricted": night rules (full current, grid and battery) at any time, off after unrestricted_hours.
+        # Not persisted: a restart turns it off.
+        self.unrestricted_ha = Switch(Settings(mqtt=mqtt_settings, entity=SwitchInfo(
+            device=device_info,
+            name='Unrestricted',
+            unique_id=f'{slug}_unrestricted',
+            icon='mdi:lightning-bolt',
+        )), unrestricted_changed)
+        self.unrestricted_ha.off()
         self.current_ha = Sensor(Settings(mqtt=mqtt_settings, entity=SensorInfo(
             name='Current',
             device_class='current',
@@ -792,9 +817,21 @@ class ChargerEntities:
         )))
         self.last_policy = None
 
+    @property
+    def unrestricted(self) -> bool:
+        """The Unrestricted switch, turning it off once its time is up."""
+        if self.unrestricted_until is not None and time.time() >= self.unrestricted_until:
+            self.unrestricted_until = None
+            self.unrestricted_ha.off()
+            print(f"🔀 {self.name}: unrestricted charging ended after {self.unrestricted_hours:g}h")
+        return self.unrestricted_until is not None
+
     def publish(self, charger: dict, policy_status: str) -> None:
         self.current_ha.set_state(charger['current'])
         self.power_ha.set_state(charger['power'])
+        if self.unrestricted_until is not None and policy_status.startswith("unrestricted"):
+            until = datetime.datetime.fromtimestamp(self.unrestricted_until, self.tz)
+            policy_status += until.strftime(" until %a %H:%M")
         if policy_status != self.last_policy:
             self.policy_ha.set_state(policy_status or "unknown")
             self.last_policy = policy_status
@@ -812,6 +849,7 @@ def charger_readings(charger_data: dict, entities: Dict[str, ChargerEntities]) -
             power_w=float(ch['power'] or 0),
             max_rate=int(ch.get('max_charging_rate') or 48),
             solar_enabled=entities[name].solar_enabled if name in entities else True,
+            unrestricted=entities[name].unrestricted if name in entities else False,
             refusing=ch['message'] in REFUSING_MESSAGES,
         ))
     return readings
@@ -970,7 +1008,10 @@ def main() -> None:
         priority = [primary_charger] + [n for n in charger_names if n != primary_charger]
 
     policy = ChargePolicy(policy_config, priority)
-    entities = {} if dry_run else {name: ChargerEntities(name, mqtt_settings) for name in charger_names}
+    entities = {} if dry_run else {
+        name: ChargerEntities(name, mqtt_settings, policy_config.unrestricted_hours, policy.tz)
+        for name in charger_names
+    }
     power_validator = PowerValidator(max_power_threshold=max_power_threshold)
     battery_power_history = []
     max_power_samples = int(power_avg_window * 60 / sleep_interval)

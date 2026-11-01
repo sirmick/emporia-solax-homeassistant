@@ -126,6 +126,35 @@ def test_night_window_car_refusing_charge_shows_full_not_unplugged():
     assert p.status("Back") == "night (not plugged in)"
 
 
+def test_unrestricted_charges_at_night_current_by_day_from_grid_and_battery():
+    p = make()
+    readings = [
+        ChargerReading("Front", True, False, 6, 0.0),
+        ChargerReading("Back", True, False, 6, 0.0, unrestricted=True),
+    ]
+    cmds = p.step(at("14:00"), Flows(-1000.0, -7000.0, 30), readings)
+    assert [(c.name, c.on, c.current) for c in cmds] == [("Back", True, 40)]
+    assert p.status("Back") == "unrestricted 40A"
+    assert p.status("Front") == "waiting: battery 30% < 95%"
+
+
+def test_unrestricted_switched_off_returns_to_solar_rules():
+    p = make()
+    on = [ChargerReading("Back", True, True, 40, 9000.0, unrestricted=True)]
+    assert p.step(at("14:00"), Flows(-2000.0, -7000.0, 30), on) == []  # already on at 40A
+    off = [ChargerReading("Back", True, True, 40, 9000.0)]
+    cmds = p.step(at("14:01"), Flows(-2000.0, -7000.0, 30), off)
+    assert [(c.on, c.reason) for c in cmds] == [(False, "unrestricted ended")]
+
+
+def test_unrestricted_carries_on_through_the_end_of_the_night_window():
+    p = make()
+    r = [ChargerReading("Back", True, True, 40, 9000.0, unrestricted=True)]
+    p.step(at("04:59"), Flows(-9000.0, 0.0, 30), r)
+    assert p.step(at("05:01"), Flows(-9000.0, 0.0, 30), r) == []
+    assert p.status("Back") == "unrestricted 40A"
+
+
 def test_battery_first_soc_gate():
     site = Site(solar=8000, house=1000, soc=90)
     site.battery_rate = 0  # pretend full-rate limited, so there is export

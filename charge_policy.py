@@ -8,6 +8,9 @@ Rules (all times local):
 * Night window (default 00:10-05:00): every charger ON at ``night_current`` so
   a car plugged in during the window starts straight away. Leaving the house
   battery out of it is the inverter's job (TOU "Battery off" slot).
+* A charger with its "Unrestricted" switch on gets the night rules at any time
+  of day (on at ``night_current``, grid and battery both welcome); poll.py
+  turns the switch off again after ``unrestricted_hours``.
 * Any other time is solar-only, battery first:
     - The budget is what the chargers already draw plus the surplus that would
       otherwise leave the site: export, minus grid import, minus battery
@@ -51,6 +54,7 @@ class PolicyConfig:
     night_start: str = "00:10"
     night_end: str = "05:00"
     night_current: int = 40
+    unrestricted_hours: int = 24  # the "Unrestricted" switch turns itself off after this
     battery_first_soc: int = 95  # solar charging starts only at/above this SOC
     battery_stop_soc: int = 90  # ...and running chargers lose their budget below this
     battery_full_soc: int = 99  # below this the battery keeps battery_reserve_w of charge
@@ -99,6 +103,7 @@ class ChargerReading:
     max_rate: int = 48
     solar_enabled: bool = True  # the HA "Use Excess Solar" switch
     refusing: bool = False  # plugged in, but the charger says the car won't take charge (full or its own limit)
+    unrestricted: bool = False  # the HA "Unrestricted" switch: night rules all day
 
 
 @dataclass
@@ -117,7 +122,7 @@ class _State:
     idle_since: Optional[float] = None  # ON + plugged in but not drawing since
     full: bool = False
     w_per_a: Optional[float] = None  # this car's measured draw per amp of set current
-    night: bool = False  # currently on because of the night window
+    night: str = ""  # "night" / "unrestricted": currently on because of the night window or the switch
     status: str = ""
     sent: Optional[Tuple[bool, int, float]] = None  # last (on, current, time) sent
 
@@ -207,7 +212,8 @@ class ChargePolicy:
         if _in_window(tod, self.night_start, self.night_end):
             cmds = self._night(chargers)
         else:
-            cmds = self._solar(t, tod, flows, self._ordered(chargers))
+            cmds = self._night([r for r in chargers if r.unrestricted], "unrestricted")
+            cmds += self._solar(t, tod, flows, self._ordered([r for r in chargers if not r.unrestricted]))
         cmds = [cmd for cmd in cmds if self._fresh(cmd, t)]
         if cmds:
             self.last_cmd = t
@@ -221,22 +227,22 @@ class ChargePolicy:
         st.sent = (cmd.on, cmd.current, t)
         return True
 
-    def _night(self, chargers: List[ChargerReading]) -> List[Command]:
+    def _night(self, chargers: List[ChargerReading], label: str = "night") -> List[Command]:
         cmds = []
         for r in chargers:
             st = self.states[r.name]
             st.full = False
-            st.night = True
+            st.night = label
             st.above_since = st.below_since = st.idle_since = None
             amps = min(self.cfg.night_current, r.max_rate)
             if not r.connected:
-                st.status = "night (not plugged in)"
+                st.status = f"{label} (not plugged in)"
             elif r.refusing:
-                st.status = "night (car full)"
+                st.status = f"{label} (car full)"
             else:
-                st.status = f"night {amps}A"
+                st.status = f"{label} {amps}A"
             if not r.on or r.current != amps:
-                cmds.append(Command(r.name, True, amps, "night window"))
+                cmds.append(Command(r.name, True, amps, "night window" if label == "night" else label))
         return cmds
 
     def _solar(self, t: float, tod: datetime.time, f: Flows, chargers: List[ChargerReading]) -> List[Command]:
@@ -247,7 +253,7 @@ class ChargePolicy:
 
         def off(r: ChargerReading, st: _State, reason: str):
             st.above_since = st.below_since = st.idle_since = None
-            st.night = False
+            st.night = ""
             if r.on:
                 cmds.append(Command(r.name, False, c.min_current, reason))
 
@@ -271,8 +277,8 @@ class ChargePolicy:
         for r in chargers:
             st = self.states[r.name]
             if st.night and r.on:
-                st.status = "night window over"
-                off(r, st, "night window over")
+                st.status = "night window over" if st.night == "night" else "unrestricted ended"
+                off(r, st, st.status)
             elif not r.connected:
                 st.status = "not plugged in"
                 off(r, st, "not plugged in")
@@ -283,7 +289,7 @@ class ChargePolicy:
                 st.status = "car full"
                 off(r, st, "car full")
             else:
-                st.night = False
+                st.night = ""
                 candidates.append(r)
 
         # Budget: what the running chargers draw plus the averaged surplus, with a

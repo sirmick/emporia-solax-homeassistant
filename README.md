@@ -94,6 +94,7 @@ precedence over the file. The charging rules live in `charge_policy` only; every
 | `timezone` | `UTC` | All times below are local to this zone |
 | `night_start` / `night_end` | `00:10` / `05:00` | Night window: every charger on at `night_current` |
 | `night_current` | `40` | Amps per charger in the night window (capped at the charger's own maximum) |
+| `unrestricted_hours` | `24` | How long a charger's "Unrestricted" switch stays on before turning itself off |
 | `battery_first_soc` | `95` | A stopped charger only starts on solar at or above this battery SOC |
 | `battery_stop_soc` | `90` | Below this SOC running chargers lose their solar budget |
 | `battery_full_soc` | `99` | Below this, the battery keeps at least `battery_reserve_w` of charge before the cars get any |
@@ -207,6 +208,8 @@ The script publishes data to MQTT with Home Assistant auto-discovery. Main topic
   `waiting: battery 87% < 95%`, `stopped: not enough solar`)
 - `homeassistant/switch/<charger_name>/use_excess_solar` (on by default at start-up; off keeps that charger out of
   solar charging, the night window still applies)
+- `homeassistant/switch/<charger_name>/unrestricted` (off at start-up; on gives that charger the night rules at any
+  time of day for `unrestricted_hours`, then turns itself off. Not kept across a restart)
 
 ### Battery Time Estimates
 - `homeassistant/sensor/solax/battery_time_to_charged`
@@ -220,6 +223,11 @@ the charge policy (`charge_policy.py`, pure logic with unit tests) what each cha
 **Night window** (default 00:10-05:00): every charger is switched on at `night_current`, plugged in or not, so a car
 connected during the window starts straight away. Keeping the house battery out of it is the inverter's job (for
 example a Solax TOU "Battery off" slot over the same hours).
+
+**Unrestricted switch**: a charger with it on is treated as in the night window all day, at `night_current`, for
+`unrestricted_hours` (the policy status reads e.g. `unrestricted 40A until Mon 07:51`). Outside the inverter's
+"Battery off" slot the house battery helps feed it. When it turns off the charger goes back to the solar rules below,
+which switch it off unless the solar budget covers it.
 
 **The rest of the day is solar only, battery first:**
 
