@@ -753,6 +753,7 @@ class ChargerEntities:
         self.solar_enabled = True
         self.unrestricted_hours = unrestricted_hours
         self.unrestricted_until: Optional[float] = None  # epoch seconds while the Unrestricted switch is on
+        self.unrestricted_shown: Optional[bool] = None  # switch state last published to HA
         slug = charger_name.lower().replace(' ', '_')
         device_info = DeviceInfo(name=charger_name, identifiers=slug)
 
@@ -779,11 +780,11 @@ class ChargerEntities:
             payload = message.payload.decode()
             if payload == "ON":
                 self.unrestricted_until = time.time() + self.unrestricted_hours * 3600
-                self.unrestricted_ha.on()
+                self._show_unrestricted()
                 print(f"🔀 {self.name}: unrestricted charging for {self.unrestricted_hours:g}h from Home Assistant")
             elif payload == "OFF":
                 self.unrestricted_until = None
-                self.unrestricted_ha.off()
+                self._show_unrestricted()
                 print(f"🔀 {self.name}: unrestricted charging off from Home Assistant")
 
         # "Unrestricted": night rules (full current, grid and battery) at any time, off after unrestricted_hours.
@@ -794,7 +795,6 @@ class ChargerEntities:
             unique_id=f'{slug}_unrestricted',
             icon='mdi:lightning-bolt',
         )), unrestricted_changed)
-        self.unrestricted_ha.off()
         self.current_ha = Sensor(Settings(mqtt=mqtt_settings, entity=SensorInfo(
             name='Current',
             device_class='current',
@@ -822,11 +822,18 @@ class ChargerEntities:
         """The Unrestricted switch, turning it off once its time is up."""
         if self.unrestricted_until is not None and time.time() >= self.unrestricted_until:
             self.unrestricted_until = None
-            self.unrestricted_ha.off()
             print(f"🔀 {self.name}: unrestricted charging ended after {self.unrestricted_hours:g}h")
         return self.unrestricted_until is not None
 
+    def _show_unrestricted(self) -> None:
+        on = self.unrestricted_until is not None
+        (self.unrestricted_ha.on if on else self.unrestricted_ha.off)()
+        self.unrestricted_shown = on
+
     def publish(self, charger: dict, policy_status: str) -> None:
+        # Here rather than at start-up: a state sent before HA has seen a new switch's discovery is lost.
+        if self.unrestricted_shown != (self.unrestricted_until is not None):
+            self._show_unrestricted()
         self.current_ha.set_state(charger['current'])
         self.power_ha.set_state(charger['power'])
         if self.unrestricted_until is not None and policy_status.startswith("unrestricted"):
