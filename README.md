@@ -101,6 +101,7 @@ precedence over the file. The charging rules live in `charge_policy` only; every
 | `battery_reserve_w` | `1000` | See above |
 | `no_grid_after` | `15:00` | From here until midnight: stop quickly (after `late_stop_delay_s`) when solar can't cover the minimum |
 | `min_current` / `max_current` | `6` / `30` | Solar current range per charger |
+| `min_cover` | `1.0` | Before `no_grid_after` (SOC ≥ `battery_stop_soc`): start and keep running at `min_current` once solar covers this share of it (see rule 7) |
 | `voltage` | `240` | Watts per amp for a car not yet seen charging; after that each car's measured draw per amp is used |
 | `margin_w` | `100` | Deadband: the current holds while the surplus is between 0 and this |
 | `avg_window_s` | `120` | Surplus averaging window |
@@ -248,7 +249,11 @@ which switch it off unless the solar budget covers it.
    `late_stop_delay_s` instead, so neither the grid nor a low battery tops the car up. It can still start again
    under rule 4 if the sun comes back (a passing cloud doesn't end the day); as the
    sun fades the share simply never covers the minimum again.
-7. If the battery is full and nothing is flowing to or from the grid or battery, the inverter may be throttling
+7. Before `no_grid_after`, with the battery at `battery_stop_soc` or more, rules 4 and 5 only need the share to
+   cover `min_cover` of `min_current` (e.g. `0.5`: start on ~700 W of export). The charger then runs at the minimum,
+   with the rest from the battery or grid, for as long as that holds; above the minimum the current still follows
+   the real surplus. Worth it where the day rate up to `no_grid_after` is the night rate and export pays little.
+8. If the battery is full and nothing is flowing to or from the grid or battery, the inverter may be throttling
    solar (export-limited setups). The policy then probes upwards `probe_step_a` amps at a time and backs off as soon
    as import or battery discharge appears.
 

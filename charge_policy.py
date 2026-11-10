@@ -33,6 +33,12 @@ Rules (all times local):
       low battery should top it up. Either way it may start again under the
       normal start rules, so a passing cloud doesn't end the day, while a
       fading sun simply never covers the minimum again.
+    - Before ``no_grid_after`` (with the battery at ``battery_stop_soc`` or
+      more), "covers the minimum" means covers ``min_cover`` of it: where the
+      day rate is the night rate, a car that is partly on solar beats
+      exporting for next to nothing and buying it all back at night. The
+      charger then runs at ``min_current`` with the rest from the battery or
+      grid; above the minimum the current still follows the real surplus.
     - With the battery full and nothing flowing to or from the grid, the
       inverter may be throttling solar (no-export setups). The policy then
       probes upwards ``probe_step_a`` at a time and backs off as soon as import
@@ -61,6 +67,7 @@ class PolicyConfig:
     battery_reserve_w: int = 1000
     no_grid_after: str = "15:00"  # from here: stop after late_stop_delay_s, not stop_delay_s
     min_current: int = 6
+    min_cover: float = 1.0  # before no_grid_after: start/keep running once solar covers this share of min_current
     max_current: int = 30  # solar cap per charger (night uses night_current)
     voltage: int = 240  # watts per amp until a car's real draw has been measured
     margin_w: int = 100  # surplus deadband: hold the current while 0 <= surplus < margin
@@ -308,6 +315,7 @@ class ChargePolicy:
         self.budget_w = max(0.0, budget)  # for display; a deficit shows as the surplus
         avail = max(0.0, budget)  # watts left to hand out, in priority order
         fast_stop = late or f.soc < c.battery_stop_soc
+        need = c.min_current if fast_stop else c.min_cover * c.min_current  # amps of solar to start/keep running
         probed = False
 
         for r in candidates:
@@ -326,6 +334,12 @@ class ChargePolicy:
                     st.status = f"solar {amps}A"
                     if amps != r.current and settled:
                         cmds.append(Command(r.name, True, amps, f"solar budget {budget:.0f}W"))
+                    continue
+                if share >= need:
+                    st.below_since = None
+                    st.status = f"part solar {c.min_current}A ({share / c.min_current:.0%})"
+                    if r.current != c.min_current and settled:
+                        cmds.append(Command(r.name, True, c.min_current, f"part solar budget {budget:.0f}W"))
                     continue
                 st.below_since = st.below_since if st.below_since is not None else t
                 delay = c.late_stop_delay_s if fast_stop else c.stop_delay_s
@@ -359,7 +373,7 @@ class ChargePolicy:
             if flat and not probed and s >= 0:
                 share = max(share, c.min_current)
                 probed = True
-            if share < c.min_current:
+            if share < need:
                 st.above_since = None
                 st.status = f"waiting: surplus {max(0, budget) / 1000:.1f}kW"
                 continue

@@ -199,6 +199,30 @@ def test_not_enough_for_minimum_never_starts():
     assert not starts(issued, "Front") and not starts(issued, "Back")
 
 
+def test_part_cover_before_cutoff_starts_and_keeps_running_until_the_cutoff():
+    # Same day and night rate until 15:00: 700W of export at 0.1c is worth
+    # putting in the car even if the rest of the 6A comes from battery/grid.
+    site = Site(solar=1700, house=1000, soc=100)  # 700W spare, 6A x 240 = 1440W
+    site.cars["Back"].plugged = False
+    p = make(min_cover=0.4)
+    issued, now = run(site, p, at("13:30"), 10)
+    assert starts(issued, "Front")
+    issued, now = run(site, p, now, 80)  # well past the 30 min dip hold
+    assert site.chargers["Front"] == {"on": True, "current": 6}
+    assert not [c for _, c in issued if not c.on]
+    assert p.status("Front").startswith("part solar 6A")
+    issued, now = run(site, p, now, 5)  # 15:00 passed: full cover again, fast stop
+    assert not site.chargers["Front"]["on"]
+
+
+def test_part_cover_still_needs_its_share():
+    site = Site(solar=1400, house=1000, soc=100)  # 400W spare < 0.4 x 1440W
+    site.cars["Back"].plugged = False
+    p = make(min_cover=0.4)
+    issued, _ = run(site, p, at("11:00"), 30)
+    assert not starts(issued, "Front")
+
+
 def test_cloud_before_cutoff_holds_30min_then_stops_and_restarts_after_5min():
     site = Site(solar=5000, house=1000, soc=100)
     p = make()

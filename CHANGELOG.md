@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-11-10
+
+### Added
+- `min_cover` charge policy key (default `1.0`, unchanged behaviour): before `no_grid_after`, with the battery at
+  `battery_stop_soc` or more, a charger starts and keeps running at `min_current` once solar covers this share of
+  it, the rest coming from the battery or grid. For tariffs where the day rate up to `no_grid_after` is the night
+  rate and export pays next to nothing.
+
 ## [2.2.0] - 2026-11-01
 
 ### Added
